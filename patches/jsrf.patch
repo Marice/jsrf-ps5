@@ -1,0 +1,180 @@
+diff --git a/port/CMakeLists.txt b/port/CMakeLists.txt
+index 338ca13..cf975a6 100644
+--- a/port/CMakeLists.txt
++++ b/port/CMakeLists.txt
+@@ -186,6 +186,9 @@ elseif(ANDROID)
+     # they stay in the dynamic symbol table, which is what names them in a
+     # crash report.
+     target_link_options(jsrf_recomp PRIVATE -Wl,--no-undefined -Wl,-Bsymbolic)
++elseif(JSRF_PS5)
++    # The PS5 title (jsrf-ps5's CMakeLists.txt adds its own libraries): pthreads in libc, no libdl.
++    target_link_libraries(jsrf_recomp PRIVATE m)
+ else()
+     target_link_libraries(jsrf_recomp PRIVATE pthread m dl)
+     target_link_options(jsrf_recomp PRIVATE -rdynamic)
+diff --git a/port/main.c b/port/main.c
+index 3ec36d6..fe3a318 100644
+--- a/port/main.c
++++ b/port/main.c
+@@ -159,6 +159,11 @@ void recomp_restart_self(void)
+      * A choice made in game (F9) is stored, and applies at the next start. */
+     fprintf(stderr, "  [WIN] restart: not on Android -- the choice applies at the next start\n");
+     return;
++#endif
++#if defined(JSRF_PS5)
++    /* The PS5: a title cannot exec itself either (jsrf-ps5 decision log D1). */
++    fprintf(stderr, "  [WIN] restart: not on the PS5 -- the choice applies at the next start\n");
++    return;
+ #endif
+     if (!g_argv || !g_argv[0]) return;
+     fflush(stdout); fflush(stderr);
+@@ -719,6 +724,9 @@ static int host_main(void)
+                 }
+             }
+         }
++#elif defined(JSRF_PS5)
++        /* The PS5 title's own fault handlers (jsrf-ps5 ps5/ps5-support.c)
++         * stay: they write the crash to the log in the title folder. */
+ #else
+         struct sigaction sa; memset(&sa, 0, sizeof sa);
+         sa.sa_sigaction = segv_handler; sa.sa_flags = SA_SIGINFO;
+@@ -1142,6 +1150,15 @@ int main(int argc, char **argv)
+         extern int nv_android_main(int argc, char **argv, int (*host)(void));
+         return nv_android_main(argc, argv, host_main);
+     }
++#endif
++#if defined(JSRF_PS5)
++    /* The PS5: jsrf-ps5's ps5/jsrf_ps5_main.c unpacks the player's disc image
++     * on the first start, sets the environment the launchers would, and runs
++     * host_main on a thread with a large stack. */
++    {
++        extern int nv_ps5_main(int argc, char **argv, int (*host)(void));
++        return nv_ps5_main(argc, argv, host_main);
++    }
+ #endif
+     if (argc > 1) g_game_dir_arg = argv[1];
+     return host_main();
+diff --git a/src/d3d/CMakeLists.txt b/src/d3d/CMakeLists.txt
+index ddf0005..0c8f828 100644
+--- a/src/d3d/CMakeLists.txt
++++ b/src/d3d/CMakeLists.txt
+@@ -16,7 +16,7 @@ if(WIN32 AND NOT XBOXRECOMP_WIN_GL)
+     # Offline smoke test for the pure format layer (no D3D11 device needed).
+     add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/../../tests/d3d8_smoke
+                      ${CMAKE_CURRENT_BINARY_DIR}/d3d8_smoke)
+-elseif(APPLE OR XBOXRECOMP_WIN_GL OR ANDROID)
++elseif(APPLE OR XBOXRECOMP_WIN_GL OR ANDROID OR JSRF_PS5)
+     # Nothing to build: a title that brings its own D3D (JSRF's is linked into
+     # its executable) reaches the GPU through the pushbuffer and nv2a_gl, and
+     # the OpenGL D3D8 below wants SDL2 and libepoxy, which a Mac only has
+diff --git a/src/kernel/CMakeLists.txt b/src/kernel/CMakeLists.txt
+index 2b3b3f4..e91438d 100644
+--- a/src/kernel/CMakeLists.txt
++++ b/src/kernel/CMakeLists.txt
+@@ -46,7 +46,7 @@ if(WIN32)
+     if(XBOXRECOMP_WIN_GL)
+         target_link_libraries(xbox_kernel PUBLIC xbox_nv2a_gl)
+     endif()
+-elseif(APPLE OR ANDROID)
++elseif(APPLE OR ANDROID OR JSRF_PS5)
+     # The crypto is the portable code in kernel_crypto.c; OpenSSL is not
+     # needed (and on an iPhone or an Android phone not there).
+     target_link_libraries(xbox_kernel PUBLIC platform xbox_nv2a_gl)
+diff --git a/src/platform/win32_compat.c b/src/platform/win32_compat.c
+index bb4f68d..f16ad34 100644
+--- a/src/platform/win32_compat.c
++++ b/src/platform/win32_compat.c
+@@ -36,6 +36,18 @@
+ #include <fcntl.h>
+ #include <mach/mach.h>
+ #include <mach/mach_host.h>
++#elif defined(JSRF_PS5)
++/* The PS5 (FreeBSD's kernel, Sony's libkernel): no sysinfo, no memfd_create.
++ * Address space is reserved with sceKernelReserveVirtualRange (a plain 4 GB
++ * PROT_NONE mmap is refused there, jsrf-ps5 decision log D2), and FreeBSD's
++ * MAP_FIXED | MAP_EXCL is Linux's MAP_FIXED_NOREPLACE. */
++#include <fcntl.h>
++#include <sys/stat.h>
++#define MAP_FIXED_NOREPLACE (MAP_FIXED | MAP_EXCL)
++int32_t sceKernelReserveVirtualRange(void **address, size_t length, int flags, size_t alignment);
++int64_t sceKernelGetDirectMemorySize(void);
++int32_t sceKernelAvailableDirectMemorySize(int64_t start, int64_t end, size_t alignment, int64_t *physical,
++                                           size_t *size);
+ #else
+ #include <sys/sysinfo.h>
+ #if defined(__ANDROID__)
+@@ -1450,9 +1462,15 @@ void *win32_reserve_address_space(void *base, size_t size)
+ {
+     void *p;
+     if (g_reserved_n >= W32_MAX_RESERVATIONS) return NULL;
++#if defined(JSRF_PS5)
++    p = base;
++    if (sceKernelReserveVirtualRange(&p, size, base ? 0x10 /* fixed */ : 0, 64 * 1024) != 0)
++        return NULL;
++#else
+     p = mmap(base, size, PROT_NONE,
+              MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+     if (p == MAP_FAILED) return NULL;
++#endif
+     if (base && p != base) { munmap(p, size); return NULL; }
+     g_reserved[g_reserved_n].base = p;
+     g_reserved[g_reserved_n].size = size;
+@@ -1685,7 +1703,7 @@ VOID DebugBreak(void) {
+ 
+ VOID SecureZeroMemory(PVOID ptr, SIZE_T cnt)
+ {
+-#if defined(__APPLE__) || defined(__ANDROID__)
++#if defined(__APPLE__) || defined(__ANDROID__) || defined(JSRF_PS5)
+     /* Darwin's memset_s is only declared when __STDC_WANT_LIB_EXT1__ is set
+      * before every string.h in the translation unit, which is not something a
+      * compat header can promise; Android's bionic has no explicit_bzero (and
+@@ -1996,6 +2014,11 @@ static int anon_map_fd(const char *name)
+             return fd;
+         }
+     }
++#elif defined(JSRF_PS5)
++    /* FreeBSD's unnamed shared memory: memfd_create's equivalent (checked on
++     * the console in phase 0, jsrf-ps5 decision log D2). */
++    (void)name;
++    return shm_open(SHM_ANON, O_RDWR | O_CREAT, 0600);
+ #else
+     return memfd_create(name ? name : "xbox_map", 0);
+ #endif
+@@ -2126,6 +2149,18 @@ BOOL GlobalMemoryStatusEx(LPMEMORYSTATUSEX b)
+         b->ullTotalPageFile = b->ullTotalPhys;
+         b->ullAvailPageFile = b->ullAvailPhys;
+     }
++#elif defined(JSRF_PS5)
++    /* The title's direct memory: its size, and the largest block still free. */
++    {
++        int64_t physical = 0;
++        size_t largest = 0;
++        if (!b) return FALSE;
++        b->ullTotalPhys = (ULONGLONG)sceKernelGetDirectMemorySize();
++        sceKernelAvailableDirectMemorySize(0, (int64_t)b->ullTotalPhys, 0, &physical, &largest);
++        b->ullAvailPhys = largest;
++        b->ullTotalPageFile = b->ullTotalPhys;
++        b->ullAvailPageFile = b->ullAvailPhys;
++    }
+ #else
+     struct sysinfo si;
+     if (!b) return FALSE;
+diff --git a/src/platform/win32_compat.h b/src/platform/win32_compat.h
+index a41c8e5..1c860e4 100644
+--- a/src/platform/win32_compat.h
++++ b/src/platform/win32_compat.h
+@@ -221,8 +221,13 @@ BOOL  TerminateProcess(HANDLE process, UINT exitCode);
+ VOID  SecureZeroMemory(PVOID ptr, SIZE_T cnt);
+ unsigned int _clearfp(void);   /* clear pending FPU exception flags */
+ 
+-/* MSVC stack alloca alias. <alloca.h> provides the underlying function. */
++/* MSVC stack alloca alias. <alloca.h> provides the underlying function
++ * (FreeBSD's, the PS5's, is in <stdlib.h>). */
++#if defined(__FreeBSD__)
++#include <stdlib.h>
++#else
+ #include <alloca.h>
++#endif
+ #define _alloca(n) alloca(n)
+ 
+ /* ---- Win32 file API (POSIX-backed) ----------------------------------- */

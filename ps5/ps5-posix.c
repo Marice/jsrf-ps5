@@ -30,32 +30,91 @@
    can count on being able to reach. */
 static const char kAppRoot[] = "/app0";
 
-/* No environment on a title: every lookup finds nothing, which is what the
-   callers already handle for a variable that is not set. HOME is the one
-   exception. Without it SuperTuxKart falls back to "." for its config, add-on,
-   screenshot and replay folders, and a title has no working directory for
-   "." to mean. With it they land under the title folder. */
+/* A title has no environment of its own (the C library's ends with nothing in
+   it), but JSRF Unleashed is configured through one: the launchers set
+   RECOMP_* and JSRF_* variables, and the engine reads them with getenv
+   (jsrf-ps5 decision log D3). So the environment is kept here, in the process:
+   setenv and putenv store, getenv finds, unsetenv removes. A value handed out
+   by getenv is never freed, so a pointer a thread holds stays valid. HOME is
+   the title folder unless set. */
+#include <pthread.h>
+
+#define ENV_MAX 128
+static struct { char* name; char* value; } g_env[ENV_MAX];
+static int g_env_count = 0;
+static pthread_mutex_t g_env_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static int env_find(const char* name, size_t n)
+{
+	for (int i = 0; i < g_env_count; i++)
+		if (strlen(g_env[i].name) == n && strncmp(g_env[i].name, name, n) == 0) return i;
+	return -1;
+}
+
+static int env_set(const char* name, size_t n, const char* value, int overwrite)
+{
+	if (name == NULL || n == 0 || memchr(name, '=', n) != NULL || value == NULL) {
+		errno = EINVAL;
+		return -1;
+	}
+	pthread_mutex_lock(&g_env_lock);
+	int i = env_find(name, n);
+	if (i >= 0 && !overwrite) {
+		pthread_mutex_unlock(&g_env_lock);
+		return 0;
+	}
+	char* copy = strdup(value);
+	if (copy == NULL || (i < 0 && g_env_count == ENV_MAX)) {
+		pthread_mutex_unlock(&g_env_lock);
+		free(copy);
+		errno = ENOMEM;
+		return -1;
+	}
+	if (i < 0) {
+		i = g_env_count++;
+		g_env[i].name = strndup(name, n);
+	}
+	g_env[i].value = copy;   /* the old value is left: a reader may hold it */
+	pthread_mutex_unlock(&g_env_lock);
+	return 0;
+}
+
 char* __wrap_getenv(const char* name)
 {
-	if (name != NULL && strcmp(name, "HOME") == 0) return (char*)kAppRoot;
-	return NULL;
+	if (name == NULL) return NULL;
+	pthread_mutex_lock(&g_env_lock);
+	int i = env_find(name, strlen(name));
+	char* value = i >= 0 ? g_env[i].value : NULL;
+	pthread_mutex_unlock(&g_env_lock);
+	if (value == NULL && strcmp(name, "HOME") == 0) return (char*)kAppRoot;
+	return value;
 }
 
 int __wrap_setenv(const char* name, const char* value, int overwrite)
 {
-	(void)name; (void)value; (void)overwrite;
-	return 0;   /* pretend it worked; nothing will read it back */
+	return env_set(name, name ? strlen(name) : 0, value, overwrite);
 }
 
 int __wrap_putenv(char* string)
 {
-	(void)string;
-	return 0;
+	const char* eq = string ? strchr(string, '=') : NULL;
+	if (eq == NULL) {
+		errno = EINVAL;
+		return -1;
+	}
+	return env_set(string, (size_t)(eq - string), eq + 1, 1);
 }
 
 int __wrap_unsetenv(const char* name)
 {
-	(void)name;
+	if (name == NULL) {
+		errno = EINVAL;
+		return -1;
+	}
+	pthread_mutex_lock(&g_env_lock);
+	int i = env_find(name, strlen(name));
+	if (i >= 0) g_env[i] = g_env[--g_env_count];   /* name and value left for readers */
+	pthread_mutex_unlock(&g_env_lock);
 	return 0;
 }
 
