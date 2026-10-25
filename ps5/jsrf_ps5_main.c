@@ -31,6 +31,7 @@
 
 int jsrf_ps5_status_begin(void); /* jsrf_ps5_gl.c */
 void jsrf_ps5_status_end(void);
+int jsrf_ps5_gl_prepare(void);
 void jsrf_ps5_screen_lines(const char *title, const char *const *lines, const int *pass, int count); /* screen */
 
 /* The desktop and Android launchers' settings (port/android/jsrf_android.c k_env), without Android's own SDL ones;
@@ -206,6 +207,8 @@ int nv_ps5_main(int argc, char **argv, int (*host)(void))
 	/* The status screen's context lets go of the surface on this thread: the renderer makes its own current on its
 	   thread, and EGL refused that while this one was still current here (0x3009, decision log D5). */
 	jsrf_ps5_status_end();
+	if (jsrf_ps5_gl_prepare() != 0)
+		return stay_with("NO OPENGL CONTEXT FOR THE RENDERER", "SEE JSRF.LOG IN THE TITLE FOLDER");
 	mkdir(SAVE_DIR, 0755);
 	chdir(GAME_DIR);
 

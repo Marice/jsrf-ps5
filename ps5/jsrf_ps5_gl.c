@@ -97,10 +97,53 @@ static EGLContext try_context(const char *what, const EGLint *attributes)
 	return c;
 }
 
+int32_t sceKernelAvailableDirectMemorySize(int64_t start, int64_t end, size_t alignment, int64_t *physical,
+                                           size_t *size);
+int64_t sceKernelGetDirectMemorySize(void);
+int32_t sceKernelAvailableFlexibleMemorySize(size_t *size);
+
+static void log_memory(const char *when)
+{
+	int64_t physical = 0;
+	size_t largest = 0, flexible = 0;
+	sceKernelAvailableDirectMemorySize(0, sceKernelGetDirectMemorySize(), 0, &physical, &largest);
+	sceKernelAvailableFlexibleMemorySize(&flexible);
+	fprintf(stderr, "jsrf: memory %s: direct %lld MiB in all, largest free block %zu MiB; flexible %zu MiB free\n",
+	        when, (long long)(sceKernelGetDirectMemorySize() >> 20), largest >> 20, flexible >> 20);
+	fflush(stderr);
+}
+
+static int gl_create(void);
+
+/* Called on the main thread before the engine starts: the renderer's context is made while the driver can still
+   have what it needs. With the engine running, eglCreateContext refused every context (0x3009, decision log D6);
+   the renderer's thread then only makes this one current. */
+int jsrf_ps5_gl_prepare(void)
+{
+	log_memory("before the renderer's context");
+	int r = gl_create();
+	eglMakeCurrent(g_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT); /* free for the renderer's thread */
+	return r;
+}
+
 static int gl_open(void)
 {
-	if (g_context != EGL_NO_CONTEXT)
+	if (g_context != EGL_NO_CONTEXT) {
+		if (!eglMakeCurrent(g_display, g_surface, g_surface, g_context)) {
+			fprintf(stderr, "jsrf: egl: the prepared context on thread %p: make current refused (0x%x)\n",
+			        (void *)pthread_self(), eglGetError());
+			return -1;
+		}
+		fprintf(stderr, "jsrf: gl: the prepared context, current on thread %p\n", (void *)pthread_self());
+		fflush(stderr);
 		return 0;
+	}
+	log_memory("when the renderer asked for its context");
+	return gl_create();
+}
+
+static int gl_create(void)
+{
 	jsrf_ps5_status_end();
 	if (egl_open() != 0)
 		return -1;
