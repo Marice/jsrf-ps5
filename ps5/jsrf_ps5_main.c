@@ -279,6 +279,10 @@ int nv_ps5_main(int argc, char **argv, int (*host)(void))
 	status("STARTING", NULL, 0);
 	log_flexible("before the engine");
 	measure_waits();
+	{
+		extern void ps5_log_main_cores(void);
+		ps5_log_main_cores();
+	}
 	/* The status screen's context lets go of the surface on this thread: the renderer makes its own current on its
 	   thread, and EGL refused that while this one was still current here (0x3009, decision log D5). */
 	jsrf_ps5_status_end();

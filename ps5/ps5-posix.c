@@ -683,6 +683,48 @@ struct thread_start {
 	int number;
 };
 
+/* Which cores a thread may run on (jsrf-ps5 decision log D12). JSRF Unleashed
+   has guest threads that spin until another thread (the emulated GPU) clears a
+   bit; on the console that other thread hardly ran while one spun, as if they
+   shared a core. Each new thread is logged with its cores, its priority and
+   where it runs, and given every core the process may use when it had fewer. */
+#include <pthread_np.h>
+#include <sys/cpuset.h>
+int pthread_getprio(pthread_t thread);
+int sceKernelGetCurrentCpu(void);
+
+static unsigned long long mask_bits(const cpuset_t* set)
+{
+	unsigned long long bits = 0;
+	for (int cpu = 0; cpu < 64 && cpu < CPU_SETSIZE; cpu++)
+		if (CPU_ISSET(cpu, set)) bits |= 1ull << cpu;
+	return bits;
+}
+
+static void spread_over_cores(int number)
+{
+	cpuset_t mine, process;
+	CPU_ZERO(&mine);
+	CPU_ZERO(&process);
+	int r1 = pthread_getaffinity_np(pthread_self(), sizeof(mine), &mine);
+	int r2 = cpuset_getaffinity(CPU_LEVEL_CPUSET, CPU_WHICH_PID, -1, sizeof(process), &process);
+	unsigned long long before = mask_bits(&mine), all = mask_bits(&process);
+	int widened = 0;
+	if (r1 == 0 && r2 == 0 && all && (before & all) != all)
+		widened = pthread_setaffinity_np(pthread_self(), sizeof(process), &process) == 0;
+	cpuset_t after_set;
+	CPU_ZERO(&after_set);
+	pthread_getaffinity_np(pthread_self(), sizeof(after_set), &after_set);
+	fprintf(stderr, "jsrf: thread %d cores 0x%llx (process 0x%llx; %d/%d)%s now 0x%llx, priority %d, on core %d\n",
+	        number, before, all, r1, r2, widened ? ", widened:" : ",", mask_bits(&after_set),
+	        pthread_getprio(pthread_self()), sceKernelGetCurrentCpu());
+}
+
+void ps5_log_main_cores(void)
+{
+	spread_over_cores(0);
+}
+
 static void* thread_trampoline(void* opaque)
 {
 	struct thread_start launch = *(struct thread_start*)opaque;
@@ -697,6 +739,7 @@ static void* thread_trampoline(void* opaque)
 	char here;
 	fprintf(stderr, "jsrf: thread %d started, stack %zu KiB near %p\n",
 	        launch.number, launch.stack / 1024, (void*)&here);
+	spread_over_cores(launch.number);
 	return launch.start(launch.arg);
 }
 
