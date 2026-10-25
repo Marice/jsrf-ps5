@@ -13,7 +13,7 @@ index 338ca13..cf975a6 100644
      target_link_libraries(jsrf_recomp PRIVATE pthread m dl)
      target_link_options(jsrf_recomp PRIVATE -rdynamic)
 diff --git a/port/main.c b/port/main.c
-index 3ec36d6..fe3a318 100644
+index 3ec36d6..010ad1d 100644
 --- a/port/main.c
 +++ b/port/main.c
 @@ -159,6 +159,11 @@ void recomp_restart_self(void)
@@ -28,7 +28,22 @@ index 3ec36d6..fe3a318 100644
  #endif
      if (!g_argv || !g_argv[0]) return;
      fflush(stdout); fflush(stderr);
-@@ -719,6 +724,9 @@ static int host_main(void)
+@@ -677,9 +682,13 @@ static int host_main(void)
+     size_t xbe_size = 0;
+ 
+ 
+-    /* Unbuffered output for immediate visibility during debugging */
++    /* Unbuffered output for immediate visibility during debugging. Not on the
++     * PS5: stderr is the log in the title folder, kept fully buffered there
++     * (each write is slow; jsrf-ps5 decision log D7). */
++#if !defined(JSRF_PS5)
+     setvbuf(stdout, NULL, _IONBF, 0);
+     setvbuf(stderr, NULL, _IONBF, 0);
++#endif
+ 
+     printf("=== JSRF Unleashed %s -- Jet Set Radio Future, statically recompiled ===\n",
+            JSRF_VERSION);
+@@ -719,6 +728,9 @@ static int host_main(void)
                  }
              }
          }
@@ -38,7 +53,7 @@ index 3ec36d6..fe3a318 100644
  #else
          struct sigaction sa; memset(&sa, 0, sizeof sa);
          sa.sa_sigaction = segv_handler; sa.sa_flags = SA_SIGINFO;
-@@ -1142,6 +1150,15 @@ int main(int argc, char **argv)
+@@ -1142,6 +1154,15 @@ int main(int argc, char **argv)
          extern int nv_android_main(int argc, char **argv, int (*host)(void));
          return nv_android_main(argc, argv, host_main);
      }

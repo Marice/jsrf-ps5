@@ -24,5 +24,7 @@ set(PS5_GL_WRAPS
   -Wl,--wrap=SDL_CreateWindow -Wl,--wrap=SDL_GL_CreateContext -Wl,--wrap=SDL_GL_DeleteContext
   -Wl,--wrap=SDL_GL_MakeCurrent -Wl,--wrap=SDL_GL_SwapWindow -Wl,--wrap=SDL_GL_GetDrawableSize
   -Wl,--wrap=SDL_GL_SetAttribute -Wl,--wrap=SDL_GL_SetSwapInterval)
-target_link_options(jsrf_recomp PRIVATE ${PS5_GL_WRAPS})
+target_link_options(jsrf_recomp PRIVATE ${PS5_GL_WRAPS}
+  # the log written in blocks: stderr flushes at most once a second (ps5/ps5-posix.c, D7)
+  -Wl,--wrap=fflush)
 set_property(TARGET jsrf_recomp APPEND_STRING PROPERTY LINK_FLAGS " ${PS5_FINAL_LINK_FLAGS}")

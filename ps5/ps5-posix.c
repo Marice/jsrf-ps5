@@ -566,19 +566,21 @@ static void log_stack(const char* why)
 	}
 }
 
+int __real_fflush(FILE* stream);
+
 void __wrap__Exit(int status)
 {
 	char why[64];
 	snprintf(why, sizeof(why), "_Exit(%d)", status);
 	log_stack(why);
-	fflush(stderr);
+	__real_fflush(stderr); /* a crash or an exit: the log out now */
 	__real__Exit(status);
 }
 
 void __wrap_abort(void)
 {
 	log_stack("abort()");
-	fflush(stderr);
+	__real_fflush(stderr); /* a crash or an exit: the log out now */
 	__real_abort();
 }
 
@@ -589,7 +591,7 @@ void __wrap___assert(const char* func, const char* file, int line,
 	        expression ? expression : "?", func ? func : "?",
 	        file ? file : "?", line);
 	log_stack("assert");
-	fflush(stderr);
+	__real_fflush(stderr); /* a crash or an exit: the log out now */
 	__real___assert(func, file, line, expression);
 }
 
@@ -613,7 +615,7 @@ static void log_fault(int signal_number, siginfo_t* info, void* context)
 	   stack is only read when the pointer is plausible. */
 	if ((uintptr_t)rsp < 0x10000 || ((uintptr_t)rsp & 7) != 0) {
 		fprintf(stderr, "jsrf:   no usable stack pointer\n");
-		fflush(stderr);
+		__real_fflush(stderr); /* a crash or an exit: the log out now */
 		signal(signal_number, SIG_DFL);
 		raise(signal_number);
 		return;
@@ -626,7 +628,7 @@ static void log_fault(int signal_number, siginfo_t* info, void* context)
 			printed++;
 		}
 	}
-	fflush(stderr);
+	__real_fflush(stderr); /* a crash or an exit: the log out now */
 	signal(signal_number, SIG_DFL);
 	raise(signal_number);
 }
@@ -739,6 +741,28 @@ int __wrap_pthread_create(pthread_t* thread, const pthread_attr_t* attr,
 		fflush(stderr);
 	}
 	return result;
+}
+
+/* --- The log: written in blocks ------------------------------------------
+
+   stderr is the log in the title folder, fully buffered (ps5-support.c):
+   each write to the title folder is slow, and upstream flushes stderr after
+   many of its lines (249 calls), which turned every line into a write
+   (jsrf-ps5 decision log D7). A flush of stderr or stdout here writes the
+   buffer out at most once a second; any other stream is flushed as asked.
+   A crash, abort or exit flushes for real (__real_fflush, above). */
+int __real_fflush(FILE* stream);
+int __wrap_fflush(FILE* stream)
+{
+	if (stream != NULL && stream != stderr && stream != stdout) return __real_fflush(stream);
+	static long long last_ms;
+	struct timespec now;
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	long long ms = (long long)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+	long long before = __atomic_load_n(&last_ms, __ATOMIC_RELAXED);
+	if (ms - before < 1000) return 0;
+	if (!__atomic_compare_exchange_n(&last_ms, &before, ms, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) return 0;
+	return __real_fflush(stream);
 }
 
 /* --- Devices ------------------------------------------------------------

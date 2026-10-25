@@ -32,6 +32,7 @@
 int jsrf_ps5_status_begin(void); /* jsrf_ps5_gl.c */
 void jsrf_ps5_status_end(void);
 int jsrf_ps5_gl_prepare(void);
+int __real_fflush(FILE *stream);
 void jsrf_ps5_screen_lines(const char *title, const char *const *lines, const int *pass, int count); /* screen */
 
 /* The desktop and Android launchers' settings (port/android/jsrf_android.c k_env), without Android's own SDL ones;
@@ -225,6 +226,6 @@ int nv_ps5_main(int argc, char **argv, int (*host)(void))
 	pthread_attr_destroy(&a);
 	pthread_join(t, NULL);
 	fprintf(stderr, "jsrf: the engine returned %d\n", call.rc);
-	fflush(NULL);
+	__real_fflush(NULL); /* fflush is held to once a second (ps5-posix.c): the log out now */
 	_exit(call.rc); /* as A2 (its D10): no second teardown */
 }
