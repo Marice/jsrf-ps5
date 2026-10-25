@@ -27,6 +27,8 @@ set(PS5_GL_WRAPS
 target_link_options(jsrf_recomp PRIVATE ${PS5_GL_WRAPS}
   # the log written in blocks: stderr flushes at most once a second (ps5/ps5-posix.c, D7)
   -Wl,--wrap=fflush
+  # a title's lstat refuses every path; stat does not (ps5/ps5-posix.c, D28)
+  -Wl,--wrap=lstat
   # a present's time, measured (ps5/jsrf_ps5_gl.c, D8)
   -Wl,--wrap=SDL_PollEvent)
 set_property(TARGET jsrf_recomp APPEND_STRING PROPERTY LINK_FLAGS " ${PS5_FINAL_LINK_FLAGS}")

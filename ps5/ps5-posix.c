@@ -963,3 +963,16 @@ int __wrap_socket(int domain, int type, int protocol)
 	        domain, type, r, __builtin_return_address(0), (void*)&log_stack);
 	return r;
 }
+
+/* --- lstat ----------------------------------------------------------------
+
+   A title's lstat answers EPERM for every path, even /app0/game, where stat
+   works (jsrf-ps5 decision log D28). JSRF Unleashed's case-insensitive file
+   lookup (kernel_path.c resolve_case) starts with lstat and gives up on any
+   error but ENOENT, so files the game asks for in another case than the disc
+   has them (TypeA.bin, typea.bin) were never found and New Game hung. A title
+   folder has no symbolic links, so lstat is stat here. */
+int __wrap_lstat(const char* path, struct stat* info)
+{
+	return stat(path, info);
+}
