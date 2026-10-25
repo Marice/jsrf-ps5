@@ -96,7 +96,7 @@ index 2b3b3f4..e91438d 100644
      # needed (and on an iPhone or an Android phone not there).
      target_link_libraries(xbox_kernel PUBLIC platform xbox_nv2a_gl)
 diff --git a/src/kernel/kernel_bridge.c b/src/kernel/kernel_bridge.c
-index 331d6fe..0843631 100644
+index 331d6fe..4e5242c 100644
 --- a/src/kernel/kernel_bridge.c
 +++ b/src/kernel/kernel_bridge.c
 @@ -2919,6 +2919,17 @@ static XboxTimer g_timers[XBOX_MAX_TIMERS];
@@ -277,7 +277,7 @@ index 331d6fe..0843631 100644
  }
  /* Stand back for a moment inside a guest spin that has no calls in it.
   *
-@@ -6892,6 +7001,19 @@ void xbox_GuestCpuPreempt(uint32_t va)
+@@ -6892,6 +7001,24 @@ void xbox_GuestCpuPreempt(uint32_t va)
      extern unsigned g_recomp_tick;
      extern unsigned char xbox_KeCurrentIrql(void);
      extern int mcpx_apu_irq_pending_global(void) __attribute__((weak));
@@ -287,10 +287,15 @@ index 331d6fe..0843631 100644
 +     * which on the PS5 its ack thread did only every ~60 ms while the spinner
 +     * held the lock and everyone queued behind it (jsrf-ps5 decision log D10).
 +     * The spinner clears it itself, as frame_pace does between its sleeps. */
++    if (t_guest_holds) {
++        /* any holder that spins, in a callback or not (D11: KickOff's wait
++         * on the flush bit too): the ack thread's round, from here */
++        extern void xbox_nv2a_ack_pass(void);
++        if ((g_recomp_tick & 0x3Fu) == 0x3Fu) xbox_nv2a_ack_pass();
++    }
 +    if (t_guest_holds && t_in_callback) {
-+        extern void xbox_nv2a_vblank_service(void);
 +        g_lock_owner_edge = va;
-+        if ((++g_recomp_tick & 0x3Fu) == 0u) xbox_nv2a_vblank_service();
++        ++g_recomp_tick;
 +        return;
 +    }
 +#endif
@@ -298,7 +303,7 @@ index 331d6fe..0843631 100644
      g_lock_owner_edge = va;
      if ((++g_recomp_tick & 0xFFu) != 0u) return;
 diff --git a/src/kernel/xbox_memory_layout.c b/src/kernel/xbox_memory_layout.c
-index 99d17e7..7b4d4da 100644
+index 99d17e7..4fd1043 100644
 --- a/src/kernel/xbox_memory_layout.c
 +++ b/src/kernel/xbox_memory_layout.c
 @@ -214,6 +214,27 @@ static void nv2a_kick_signal(void)
@@ -337,6 +342,52 @@ index 99d17e7..7b4d4da 100644
  void xbox_nv2a_kick(void)
  {
      if (s_kick_on < 0) { const char *e = getenv("RECOMP_NV2A_KICK"); s_kick_on = e ? atoi(e) : 1; }
+@@ -718,6 +740,45 @@ void xbox_nv2a_vblank_service(void)
+     if (g_nv2a_memory) vblank_intr_tick((volatile uint32_t *)g_nv2a_memory);
+ }
+ 
++#if defined(JSRF_PS5)
++/* One round of the ack thread's handshake work, for a guest thread that spins
++ * on it (jsrf-ps5 decision log D11). On the PS5 the ack thread did not get to
++ * run while a guest thread spun: D3D's interrupt routine waited ~60 ms on the
++ * vblank's bits (D10), then KickOff (sub_001912A0) on the PFB flush bit, with
++ * the guest lock held and the game at 7.5 frames a second. The same writes the
++ * thread makes, so running them from both is what upstream's frame_pace
++ * already does for the vblank. */
++static void fence_mirrors_tick(void);
++static void counter_mirrors_tick(void);
++void xbox_nv2a_ack_pass(void)
++{
++    volatile uint32_t *regs = (volatile uint32_t *)g_nv2a_memory;
++    extern int xbox_nv2a_swm_in_flight(void);
++    if (!regs) return;
++    vblank_intr_tick(regs);
++    for (size_t i = 0; i < sizeof(NV2A_ACK) / sizeof(NV2A_ACK[0]); i++) {
++        volatile uint32_t *r = (volatile uint32_t *)((char *)regs + NV2A_ACK[i].offset);
++        if (NV2A_ACK[i].offset == 0x400100u && xbox_nv2a_swm_in_flight())
++            continue;
++        if (*r & NV2A_ACK[i].busy_mask)
++            *r &= ~NV2A_ACK[i].busy_mask;
++    }
++    for (size_t i = 0; i < sizeof(NV2A_IDLE) / sizeof(NV2A_IDLE[0]); i++) {
++        volatile uint32_t *r = (volatile uint32_t *)((char *)regs + NV2A_IDLE[i].offset);
++        if ((*r & NV2A_IDLE[i].idle_mask) != NV2A_IDLE[i].idle_mask)
++            *r |= NV2A_IDLE[i].idle_mask;
++    }
++    {
++        volatile uint32_t *put = (volatile uint32_t *)((char *)regs + NV2A_USER_DMA_PUT);
++        volatile uint32_t *get = (volatile uint32_t *)((char *)regs + NV2A_USER_DMA_GET);
++        if (*get != *put)
++            *get = *put;
++    }
++    fence_mirrors_tick();
++    counter_mirrors_tick();
++}
++#endif
++
+ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+ {
+     volatile uint32_t *regs = (volatile uint32_t *)param;
 diff --git a/src/platform/win32_compat.c b/src/platform/win32_compat.c
 index bb4f68d..53423e5 100644
 --- a/src/platform/win32_compat.c
