@@ -170,53 +170,10 @@ index 2b3b3f4..e91438d 100644
      # needed (and on an iPhone or an Android phone not there).
      target_link_libraries(xbox_kernel PUBLIC platform xbox_nv2a_gl)
 diff --git a/src/kernel/kernel_bridge.c b/src/kernel/kernel_bridge.c
-index 331d6fe..a77deb8 100644
+index 331d6fe..4e9e403 100644
 --- a/src/kernel/kernel_bridge.c
 +++ b/src/kernel/kernel_bridge.c
-@@ -1676,7 +1676,42 @@ static void bridge_KeSetEvent(void)
- 
- /* ── KeWaitForSingleObject (ordinal 159) ─────────────────── */
- static HANDLE bridge_resolve_handle(uint32_t token);
-+#if defined(JSRF_PS5)
-+/* D3D's busy-block wait (jsrf-ps5 decision log D20). sub_00191440's make-space
-+ * path for 32 KB or more sleeps on the device's busy-block event (device +
-+ * 0x2440; the device pointer is at 0x0019DCE0) until its NOP(5) reaches the
-+ * GPU. On the console, a drained pushbuffer means every NOP(5) in it has been
-+ * passed; here the walk had read the whole ring to PUT without one, and the
-+ * game slept on "Now Loading" for good. So while the game waits on that event
-+ * and the ring is drained, the ack thread delivers software method 5 once. */
-+void xbox_nv2a_software_method(uint32_t subch, uint32_t param);
-+static volatile int g_ps5_bb_wait, g_ps5_bb_kicked;
-+static volatile long long g_ps5_bb_since;
-+static unsigned long g_ps5_bb_kicks;
-+void ps5_busy_block_check(int drained)
-+{
-+    if (!g_ps5_bb_wait || g_ps5_bb_kicked || !drained) return;
-+    if ((long long)GetTickCount64() - g_ps5_bb_since < 20) return;
-+    g_ps5_bb_kicked = 1;
-+    g_ps5_bb_kicks++;
-+    if (g_ps5_bb_kicks <= 8 || (g_ps5_bb_kicks & (g_ps5_bb_kicks - 1)) == 0)
-+        fprintf(stderr, "  [BUSYBLOCK] the game waits on D3D's busy-block event with the pushbuffer drained: "
-+                "software method 5 delivered (#%lu)\n", g_ps5_bb_kicks);
-+    xbox_nv2a_software_method(0, 5);
-+}
-+static void bridge_KeWaitForSingleObject_inner(void);
- static void bridge_KeWaitForSingleObject(void)
-+{
-+    uint32_t dev = BRIDGE_MEM32(0x0019DCE0u);
-+    int bb = dev && STACK_ARG(0) == dev + 0x2440u;
-+    if (bb) { g_ps5_bb_since = (long long)GetTickCount64(); g_ps5_bb_kicked = 0; g_ps5_bb_wait = 1; }
-+    bridge_KeWaitForSingleObject_inner();
-+    if (bb) g_ps5_bb_wait = 0;
-+}
-+static void bridge_KeWaitForSingleObject_inner(void)
-+#else
-+static void bridge_KeWaitForSingleObject(void)
-+#endif
- {
-     uint32_t object = STACK_ARG(0);
-     uint32_t wait_reason = STACK_ARG(1);
-@@ -2919,6 +2954,17 @@ static XboxTimer g_timers[XBOX_MAX_TIMERS];
+@@ -2919,6 +2919,17 @@ static XboxTimer g_timers[XBOX_MAX_TIMERS];
  static CRITICAL_SECTION g_timer_lock;
  static int g_timer_started;
  
@@ -234,7 +191,7 @@ index 331d6fe..a77deb8 100644
  static DWORD WINAPI kernel_timer_thread(LPVOID unused)
  {
      int slot = xbox_worker_stack_alloc();
-@@ -2946,11 +2992,40 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
+@@ -2946,11 +2957,40 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
          g_fs_base = tib;
      }
  
@@ -275,7 +232,7 @@ index 331d6fe..a77deb8 100644
          /*
           * RECOMP_TABLE_WATCH=<addr>,<bytes>,<stride>: catch a pointer table
           * going bad at the moment it goes bad.
-@@ -3018,12 +3093,19 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
+@@ -3018,12 +3058,19 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
                  prev_valid = 1;
              }
          }
@@ -295,7 +252,7 @@ index 331d6fe..a77deb8 100644
          now = (long long)GetTickCount64();
  
          for (i = 0; i < XBOX_MAX_TIMERS; i++) {
-@@ -3047,6 +3129,7 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
+@@ -3047,6 +3094,7 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
              if (dpc)
                  kernel_run_dpc(dpc, 0, 0);
          }
@@ -303,7 +260,7 @@ index 331d6fe..a77deb8 100644
      }
  }
  
-@@ -6169,6 +6252,32 @@ static RECOMP_TLS int g_kernel_dispatch_slot = -1;
+@@ -6169,6 +6217,32 @@ static RECOMP_TLS int g_kernel_dispatch_slot = -1;
   *
   * RECOMP_GUEST_LOCK=0 disables it. */
  static CRITICAL_SECTION g_guest_lock;
@@ -336,7 +293,7 @@ index 331d6fe..a77deb8 100644
  static volatile unsigned long g_lock_owner;   /* see xbox_guest_lock_report */
  #ifdef __APPLE__
  #include <pthread.h>
-@@ -6258,6 +6367,33 @@ int32_t g_xbox_guest_cpu_preempt;
+@@ -6258,6 +6332,33 @@ int32_t g_xbox_guest_cpu_preempt;
  /* The holder's latest loop back edge and its IRQL there, for the [LOCK]
   * report. */
  static volatile uint32_t g_lock_owner_edge;
@@ -370,76 +327,11 @@ index 331d6fe..a77deb8 100644
  static volatile unsigned g_lock_owner_irql;
  /* Interrupts delivered from inside a spin rather than on the timer thread. */
  static unsigned long g_spin_isrs;
-@@ -6384,7 +6520,11 @@ void xbox_guest_lock_acquire(void)
-       int watch = lock_watch();
-       if (watch) t0 = (long long)GetTickCount64();
-       __atomic_add_fetch(&g_xbox_guest_cpu_preempt, 1, __ATOMIC_RELAXED);
-+#if defined(JSRF_PS5)
-+      ps5_guest_lock_take();
-+#else
-       EnterCriticalSection(&g_guest_lock);
-+#endif
-       __atomic_sub_fetch(&g_xbox_guest_cpu_preempt, 1, __ATOMIC_RELAXED);
-       __atomic_add_fetch(&g_lock_acquires, 1, __ATOMIC_RELEASE);
-       if (watch) {
-@@ -6511,7 +6651,11 @@ void xbox_guest_lock_release(void)
-             (long long)GetTickCount64() - t_guest_since;
-     t_guest_holds = 0;
-     g_lock_owner = 0;
-+#if defined(JSRF_PS5)
-+    ps5_guest_lock_give();
-+#else
-     LeaveCriticalSection(&g_guest_lock);
-+#endif
- }
- /* Stand back for a moment inside a guest spin that has no calls in it.
-  *
-@@ -6892,6 +7036,24 @@ void xbox_GuestCpuPreempt(uint32_t va)
-     extern unsigned g_recomp_tick;
-     extern unsigned char xbox_KeCurrentIrql(void);
-     extern int mcpx_apu_irq_pending_global(void) __attribute__((weak));
-+#if defined(JSRF_PS5)
-+    /* A holder inside an interrupt or DPC cannot hand over; D3D's NV2A
-+     * interrupt routine spins there until the emulated GPU clears PMC_INTR_0,
-+     * which on the PS5 its ack thread did only every ~60 ms while the spinner
-+     * held the lock and everyone queued behind it (jsrf-ps5 decision log D10).
-+     * The spinner clears it itself, as frame_pace does between its sleeps. */
-+    if (t_guest_holds) {
-+        /* any holder that spins, in a callback or not (D11: KickOff's wait
-+         * on the flush bit too): the ack thread's round, from here */
-+        extern void xbox_nv2a_ack_pass(void);
-+        if ((g_recomp_tick & 0x3Fu) == 0x3Fu) xbox_nv2a_ack_pass();
-+    }
-+    if (t_guest_holds && t_in_callback) {
-+        g_lock_owner_edge = va;
-+        ++g_recomp_tick;
-+        return;
-+    }
-+#endif
-     if (!t_guest_holds || t_in_callback) return;
-     g_lock_owner_edge = va;
-     if ((++g_recomp_tick & 0xFFu) != 0u) return;
 diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
-index 2381627..702c58a 100644
+index 2381627..9a46a58 100644
 --- a/src/kernel/nv2a_pb_exec.c
 +++ b/src/kernel/nv2a_pb_exec.c
-@@ -1494,7 +1494,15 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
-      * stream as the title wrote it, not the subset that can be rasterised in
-      * software. Returns immediately unless RECOMP_GL is set. */
-     if (nv2a_gl_enabled() && subch == 0) {
-+#if defined(JSRF_PS5)
-+        { extern double ps5_prof_ms(void);
-+          extern void ps5_method_note(uint32_t method, double ms);
-+          double _t0 = ps5_prof_ms();
-+          nv2a_gl_method(method, param);
-+          ps5_method_note(method, ps5_prof_ms() - _t0); }
-+#else
-         nv2a_gl_method(method, param);
-+#endif
-         /*
-          * With GL rendering, everything below this line is dead weight.
-          *
-@@ -1957,3 +1965,45 @@ void nv2a_pb_exec_report(void)
+@@ -1957,3 +1957,45 @@ void nv2a_pb_exec_report(void)
      }
      }    fflush(stderr);
  }
@@ -558,7 +450,7 @@ index ff710cf..1f67ddc 100644
          }
          if ((w & 3u) == 2u) {
 diff --git a/src/kernel/xbox_memory_layout.c b/src/kernel/xbox_memory_layout.c
-index 99d17e7..e932c74 100644
+index 99d17e7..5fc8334 100644
 --- a/src/kernel/xbox_memory_layout.c
 +++ b/src/kernel/xbox_memory_layout.c
 @@ -214,6 +214,27 @@ static void nv2a_kick_signal(void)
@@ -724,20 +616,7 @@ index 99d17e7..e932c74 100644
          vblank_intr_tick(regs);
          for (size_t i = 0; i < sizeof(NV2A_ACK) / sizeof(NV2A_ACK[0]); i++) {
              volatile uint32_t *r =
-@@ -747,14 +885,22 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
-                 (volatile uint32_t *)((char *)regs + NV2A_USER_DMA_PUT);
-             volatile uint32_t *get =
-                 (volatile uint32_t *)((char *)regs + NV2A_USER_DMA_GET);
-+#if defined(JSRF_PS5)
-+            /* On the PS5 GET follows the walk (below), not PUT: decision log D25. */
-+            (void)put; (void)get;
-+#else
-             if (*get != *put) {
-                 *get = *put;
-             }
-+#endif
-         }
-         fence_mirrors_tick();
+@@ -755,6 +893,9 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
          counter_mirrors_tick();
          frame_counters_tick();
          framebuffer_probe_tick();
@@ -747,7 +626,7 @@ index 99d17e7..e932c74 100644
  
          /* Which framebuffer the display would be scanning out.
           *
-@@ -793,9 +939,17 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -793,9 +934,17 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
                       * The contiguous window IS the physical-address view, so
                       * OR-ing its base is the documented round trip, not a
                       * guess. */
@@ -766,12 +645,12 @@ index 99d17e7..e932c74 100644
                      } else if (last_put && put < last_put) {
                          /* The ring wrapped: PUT went back to its start.
                           * The tail from the old PUT to the jump used to be
-@@ -805,10 +959,37 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -805,10 +954,37 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
                           * then from the jump's target to the new PUT. */
                          uint32_t from = XBOX_CONTIG_BASE | (last_put & 0x0FFFFFFFu);
                          uint32_t to   = XBOX_CONTIG_BASE | (put      & 0x0FFFFFFFu);
 -                        uint32_t j = nv2a_pb_scan(from, from + 0x20000u);
-+#if defined(JSRF_PS5)
++#if 0 /* D24, reverted in D27 */
 +                        /* The tail up to its jump, however long: a make-space
 +                         * for 32 KB or more leaves more than 128 KB between the
 +                         * old PUT and the jump, upstream's limit here; the jump
@@ -806,41 +685,17 @@ index 99d17e7..e932c74 100644
                          }
                      }
                      /* Periodic, because what the title submits at init is not
-@@ -821,6 +1002,18 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
-                     }
-                 }
-                 last_put = put; last_put_ms = now_ms;
-+#if defined(JSRF_PS5)
-+                /* GET is how far the GPU has read: D3D writes only where GET
-+                 * has passed. Upstream set it to PUT at the top of each round,
-+                 * before this walk; on a PC the walk follows within ~200 us,
-+                 * but here a round's walk can take 12 ms and more (it
-+                 * presents), and D3D, seeing everything read, lapped the ring
-+                 * and wrote over commands the walk had yet to read: garbage
-+                 * calls, wraps without a jump, a lost NOP(5), artefacts and
-+                 * page faults (decision log D25). So GET is moved only to what
-+                 * has been walked. */
-+                *(volatile uint32_t *)((char *)regs + NV2A_USER_DMA_GET) = put;
-+#endif
-                 /* GET as well as PUT. A title that stops submitting has either
-                  * finished or is spinning on the GPU catching up, and only GET
-                  * tells those apart -- D3D waits for GET to reach PUT before it
-@@ -878,6 +1071,14 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -878,6 +1054,9 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
          *(volatile uint32_t *)((uintptr_t)(XBOX_KERNEL_DATA_BASE + KDATA_TICK_COUNT)
                                 + g_memory_offset) = GetTickCount();
  
 +#if defined(JSRF_PS5)
 +        { double _n = ps5_prof_ms(); ps5a[1] += _n - ps5a_t; ps5a_t = _n; }
-+        { extern void ps5_busy_block_check(int drained);
-+          uint32_t p_ = regs[NV2A_USER_DMA_PUT / 4], g_ = regs[NV2A_USER_DMA_GET / 4];
-+          static uint32_t seen_put;
-+          ps5_busy_block_check(p_ == g_ && p_ == seen_put);   /* drained, and nothing new this round */
-+          seen_put = p_; }
 +#endif
          /* Yield -- or actually sleep, on a host with fewer cores than the
           * runtime has busy threads. RECOMP_ACK_SLEEP_US=<n> (default 200 on
           * POSIX) keeps this thread from eating a whole core; the pushbuffer
-@@ -905,6 +1106,9 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -905,6 +1084,9 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
              else Sleep(0);
  #endif
          }
