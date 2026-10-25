@@ -514,10 +514,10 @@ index 99d17e7..0d0af9f 100644
      return 0;
  }
 diff --git a/src/nv2a_gl/nv2a_gl.c b/src/nv2a_gl/nv2a_gl.c
-index 75b66db..7f132c7 100644
+index 75b66db..0e503b5 100644
 --- a/src/nv2a_gl/nv2a_gl.c
 +++ b/src/nv2a_gl/nv2a_gl.c
-@@ -1757,18 +1757,53 @@ static void sdl_menu_command(unsigned id)
+@@ -1757,18 +1757,169 @@ static void sdl_menu_command(unsigned id)
   * 16:9 (the 640x480 surface holds a 16:9 view squeezed), anything else at its
   * own shape. One blit; every piece of GL state the renderer caches is put
   * back the way it was. */
@@ -552,6 +552,122 @@ index 75b66db..7f132c7 100644
 +#define PS5P_T(k) ((void)0)
 +#endif
 +
++#if defined(JSRF_PS5)
++/* The frame onto the screen by drawing, not glBlitFramebuffer (jsrf-ps5
++ * decision log D14): on the PS5's GL driver the scaled blit took 123 ms a
++ * frame and the window's clear 6 ms, on the thread that also walks the
++ * pushbuffer, so the game waited for room in it and ran at 7.5 frames a
++ * second. One triangle over the window samples the frame's colour texture
++ * inside its letterboxed rectangle and is black outside it, so nothing is
++ * cleared either. The renderer's GL state is put back afterwards. Returns 0
++ * when the frame is not a texture (then the blit below runs). */
++static int ps5_present_draw(GLuint src_fbo, int sw, int sh, int ww, int wh, int dx, int dy, int dw, int dh)
++{
++    static GLuint prog, vao, sampler;
++    static GLint u_rect, u_scale, u_tex;
++    static int broken;
++    GLint obj_type = 0, tex = 0, tw = 0, th = 0;
++    GLint old_prog, old_vao, old_active, old_tex, old_sampler, old_fbo;
++    GLboolean blend, depth, cull, stencil, srgb;
++
++    if (broken) return 0;
++    glBindFramebuffer(GL_READ_FRAMEBUFFER, src_fbo);
++    glGetFramebufferAttachmentParameteriv(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
++                                          GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &obj_type);
++    if (obj_type != GL_TEXTURE) return 0;
++    glGetFramebufferAttachmentParameteriv(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
++                                          GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, &tex);
++    if (!tex) return 0;
++
++    glGetIntegerv(GL_CURRENT_PROGRAM, &old_prog);
++    glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &old_vao);
++    glGetIntegerv(GL_ACTIVE_TEXTURE, &old_active);
++    glActiveTexture(GL_TEXTURE0);
++    glGetIntegerv(GL_TEXTURE_BINDING_2D, &old_tex);
++    glGetIntegerv(GL_SAMPLER_BINDING, &old_sampler);
++    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &old_fbo);
++    blend = glIsEnabled(GL_BLEND);
++    depth = glIsEnabled(GL_DEPTH_TEST);
++    cull = glIsEnabled(GL_CULL_FACE);
++    stencil = glIsEnabled(GL_STENCIL_TEST);
++    srgb = glIsEnabled(GL_FRAMEBUFFER_SRGB);
++
++    if (!prog) {
++        static const char *vs =
++            "#version 330 core\n"
++            "void main() {\n"
++            "    vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);\n"
++            "    gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);\n"
++            "}\n";
++        static const char *fs =
++            "#version 330 core\n"
++            "uniform vec4 rect;   /* x, y, w, h of the picture in window pixels */\n"
++            "uniform vec2 scale;  /* the frame's part of its texture */\n"
++            "uniform sampler2D tex;\n"
++            "out vec4 color;\n"
++            "void main() {\n"
++            "    vec2 f = (gl_FragCoord.xy - rect.xy) / rect.zw;\n"
++            "    if (any(lessThan(f, vec2(0.0))) || any(greaterThan(f, vec2(1.0)))) { color = vec4(0.0, 0.0, 0.0, 1.0); return; }\n"
++            "    color = vec4(texture(tex, f * scale).rgb, 1.0);\n"
++            "}\n";
++        GLuint v = glCreateShader(GL_VERTEX_SHADER), f = glCreateShader(GL_FRAGMENT_SHADER);
++        GLint ok_v = 0, ok_f = 0, ok_p = 0;
++        glShaderSource(v, 1, &vs, NULL); glCompileShader(v); glGetShaderiv(v, GL_COMPILE_STATUS, &ok_v);
++        glShaderSource(f, 1, &fs, NULL); glCompileShader(f); glGetShaderiv(f, GL_COMPILE_STATUS, &ok_f);
++        prog = glCreateProgram();
++        glAttachShader(prog, v); glAttachShader(prog, f); glLinkProgram(prog);
++        glGetProgramiv(prog, GL_LINK_STATUS, &ok_p);
++        glDeleteShader(v); glDeleteShader(f);
++        if (!ok_v || !ok_f || !ok_p) {
++            char log[512] = "";
++            glGetProgramInfoLog(prog, sizeof log, NULL, log);
++            fprintf(stderr, "[WIN] present by drawing: shader %d/%d/%d (%s); the blit stays\n", ok_v, ok_f, ok_p, log);
++            broken = 1;
++            glUseProgram((GLuint)old_prog);
++            return 0;
++        }
++        u_rect = glGetUniformLocation(prog, "rect");
++        u_scale = glGetUniformLocation(prog, "scale");
++        u_tex = glGetUniformLocation(prog, "tex");
++        glGenVertexArrays(1, &vao);
++        glGenSamplers(1, &sampler);
++        glSamplerParameteri(sampler, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
++        glSamplerParameteri(sampler, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
++        glSamplerParameteri(sampler, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
++        glSamplerParameteri(sampler, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
++        fprintf(stderr, "[WIN] the frame is put on screen by drawing it (the PS5's scaled blit is slow)\n");
++    }
++
++    glBindTexture(GL_TEXTURE_2D, (GLuint)tex);
++    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &tw);
++    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &th);
++    glBindSampler(0, sampler);
++    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
++    glViewport(0, 0, ww, wh);
++    glDisable(GL_BLEND); glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE);
++    glDisable(GL_STENCIL_TEST); glDisable(GL_FRAMEBUFFER_SRGB);
++    glUseProgram(prog);
++    glUniform4f(u_rect, (float)dx, (float)dy, (float)dw, (float)dh);
++    glUniform2f(u_scale, tw > 0 ? (float)sw / (float)tw : 1.0f, th > 0 ? (float)sh / (float)th : 1.0f);
++    glUniform1i(u_tex, 0);
++    glBindVertexArray(vao);
++    glDrawArrays(GL_TRIANGLES, 0, 3);
++
++    glBindVertexArray((GLuint)old_vao);
++    glUseProgram((GLuint)old_prog);
++    glBindSampler(0, (GLuint)old_sampler);
++    glBindTexture(GL_TEXTURE_2D, (GLuint)old_tex);
++    glActiveTexture((GLenum)old_active);
++    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)old_fbo);
++    if (blend) glEnable(GL_BLEND);
++    if (depth) glEnable(GL_DEPTH_TEST);
++    if (cull) glEnable(GL_CULL_FACE);
++    if (stencil) glEnable(GL_STENCIL_TEST);
++    if (srgb) glEnable(GL_FRAMEBUFFER_SRGB);
++    return 1;
++}
++#endif
++
  static void sdl_present(GLuint src_fbo, int sw, int sh)
  {
      GLint vp[4], sbox[4], rfb = 0, dfb = 0;
@@ -571,7 +687,17 @@ index 75b66db..7f132c7 100644
      if (ww <= 0 || wh <= 0) return;
      if (nv2a_wide_scene()) { fw = (int)(nv2a_wide_aspect() * 900.0f + 0.5f); fh = 900; }   /* 16:9 = 1600:900 */
      dw = ww; dh = wh;
-@@ -1780,17 +1815,21 @@ static void sdl_present(GLuint src_fbo, int sw, int sh)
+@@ -1776,21 +1927,32 @@ static void sdl_present(GLuint src_fbo, int sw, int sh)
+     else                               dh = (int)((long)ww * fh / fw);
+     glDisable(GL_SCISSOR_TEST);
+     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
++#if defined(JSRF_PS5)
++    if (ps5_present_draw(src_fbo, sw, sh, ww, wh, (ww - dw) / 2, (wh - dh) / 2, dw, dh)) {
++        PS5P_T(PS5P_BLIT);
++    } else
++#endif
++    {
+     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
      glViewport(0, 0, ww, wh);
      glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
      glClear(GL_COLOR_BUFFER_BIT);
@@ -581,6 +707,7 @@ index 75b66db..7f132c7 100644
                        (ww - dw) / 2, (wh - dh) / 2, (ww - dw) / 2 + dw, (wh - dh) / 2 + dh,
                        GL_COLOR_BUFFER_BIT, GL_LINEAR);
 +    PS5P_T(PS5P_BLIT);
++    }
      SDL_GL_SwapWindow(g_window);
 +    PS5P_T(PS5P_SWAP);
      glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)rfb);
@@ -593,7 +720,7 @@ index 75b66db..7f132c7 100644
      { static int said;
        if (said < 3) {
            said++;
-@@ -9618,11 +9657,17 @@ static void present(int is_frame)
+@@ -9618,11 +9780,17 @@ static void present(int is_frame)
          }
      }
  
@@ -611,7 +738,7 @@ index 75b66db..7f132c7 100644
  
      /* Put the finished frame on screen: the surface the title has set up
       * when it flips, which is what the window showed while surfaces were
-@@ -9667,13 +9712,24 @@ static void present(int is_frame)
+@@ -9667,13 +9835,24 @@ static void present(int is_frame)
              if (g_presenter == 1) sdl_hand_over(nv2a_gfx_gl_fbo(prt), (int)pw, (int)ph);
              else
  #endif
