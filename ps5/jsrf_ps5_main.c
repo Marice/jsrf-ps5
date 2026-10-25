@@ -48,6 +48,7 @@ static const char *const k_env[][2] = {
 	{"RECOMP_FULLSCREEN", "1"}, {"RECOMP_WINDOW_W", "1920"}, {"RECOMP_WINDOW_H", "1080"},
 	{"SDL_VIDEODRIVER", "offscreen"},
 	{"RECOMP_GL_PROFILE", "1"}, /* dev builds: where a frame's time goes (decision log D7) */
+	{"RECOMP_LOCK_WATCH", "1"}, /* dev builds: the guest lock's waits and hand-overs (decision log D8) */
 	{"JSRF_GAME_DIR", GAME_DIR}, {"JSRF_SAVE_DIR", SAVE_DIR}, {"JSRF_SETTINGS_FILE", SETTINGS_FILE},
 	{"TMPDIR", TITLE_DIR},
 };

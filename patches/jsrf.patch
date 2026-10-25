@@ -96,7 +96,7 @@ index 2b3b3f4..e91438d 100644
      # needed (and on an iPhone or an Android phone not there).
      target_link_libraries(xbox_kernel PUBLIC platform xbox_nv2a_gl)
 diff --git a/src/kernel/kernel_bridge.c b/src/kernel/kernel_bridge.c
-index 331d6fe..6dfae23 100644
+index 331d6fe..2e0b256 100644
 --- a/src/kernel/kernel_bridge.c
 +++ b/src/kernel/kernel_bridge.c
 @@ -2919,6 +2919,15 @@ static XboxTimer g_timers[XBOX_MAX_TIMERS];
@@ -182,6 +182,63 @@ index 331d6fe..6dfae23 100644
      }
  }
  
+@@ -6169,6 +6213,32 @@ static RECOMP_TLS int g_kernel_dispatch_slot = -1;
+  *
+  * RECOMP_GUEST_LOCK=0 disables it. */
+ static CRITICAL_SECTION g_guest_lock;
++#if defined(JSRF_PS5)
++/* The PS5: the guest lock is a ticket lock (jsrf-ps5 decision log D8).
++ *
++ * As a pthread mutex, a waiter woke too slowly on the PS5 for the hand-over
++ * below (which waits at most RECOMP_HANDOFF_US, 1 ms, for a waiter to take
++ * the lock before taking it back): the holder won nearly every time, the
++ * timer thread waited 15 to 44 ms per round for its DPCs, and the vertical
++ * blank came 8 to 11 times a second instead of 60. Here each taker draws a
++ * number and the lock goes to the numbers in order: a release hands it to the
++ * next waiter at once, and the holder taking it back queues behind. Waiters
++ * spin, then yield (sched_yield costs about 4 us here). */
++static volatile unsigned g_ps5_ticket_next, g_ps5_ticket_serving;
++static void ps5_guest_lock_take(void)
++{
++    unsigned mine = __atomic_fetch_add(&g_ps5_ticket_next, 1, __ATOMIC_RELAXED);
++    unsigned spins = 0;
++    while (__atomic_load_n(&g_ps5_ticket_serving, __ATOMIC_ACQUIRE) != mine) {
++        if (++spins < 64) __builtin_ia32_pause();
++        else sched_yield();
++    }
++}
++static void ps5_guest_lock_give(void)
++{
++    __atomic_add_fetch(&g_ps5_ticket_serving, 1, __ATOMIC_RELEASE);
++}
++#endif
+ static volatile unsigned long g_lock_owner;   /* see xbox_guest_lock_report */
+ #ifdef __APPLE__
+ #include <pthread.h>
+@@ -6384,7 +6454,11 @@ void xbox_guest_lock_acquire(void)
+       int watch = lock_watch();
+       if (watch) t0 = (long long)GetTickCount64();
+       __atomic_add_fetch(&g_xbox_guest_cpu_preempt, 1, __ATOMIC_RELAXED);
++#if defined(JSRF_PS5)
++      ps5_guest_lock_take();
++#else
+       EnterCriticalSection(&g_guest_lock);
++#endif
+       __atomic_sub_fetch(&g_xbox_guest_cpu_preempt, 1, __ATOMIC_RELAXED);
+       __atomic_add_fetch(&g_lock_acquires, 1, __ATOMIC_RELEASE);
+       if (watch) {
+@@ -6511,7 +6585,11 @@ void xbox_guest_lock_release(void)
+             (long long)GetTickCount64() - t_guest_since;
+     t_guest_holds = 0;
+     g_lock_owner = 0;
++#if defined(JSRF_PS5)
++    ps5_guest_lock_give();
++#else
+     LeaveCriticalSection(&g_guest_lock);
++#endif
+ }
+ /* Stand back for a moment inside a guest spin that has no calls in it.
+  *
 diff --git a/src/platform/win32_compat.c b/src/platform/win32_compat.c
 index bb4f68d..53423e5 100644
 --- a/src/platform/win32_compat.c
