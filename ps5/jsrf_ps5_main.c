@@ -136,6 +136,55 @@ static int on_progress(void *ctx, uint64_t done, uint64_t total)
 	return 0;
 }
 
+/* ---- the game's folder listing ----
+   A title may not read folders here (opendir is refused), and the game asks for its files in other cases than the
+   disc has them (stage01.bin for Stage01.bin): upstream finds them by listing the folder (kernel_path.c), the bug
+   upstream's 0.1.1 fixed on Linux, which left New Game on "Now Loading" for good. ps5-posix.c answers a refused
+   opendir from dirs.txt in the title folder, so the title writes one for game/ from the disc image (decision log
+   D15): lines of folder, name and d or f, the folder relative to the title folder. */
+#define DIRS_FILE TITLE_DIR "/dirs.txt"
+#define DIRS_PART TITLE_DIR "/dirs.txt.part"
+
+struct listing {
+	FILE *out;
+	const char *from; /* the folder the paths start with, replaced by "game" */
+	unsigned lines;
+};
+
+static void list_entry(void *ctx, const char *path, int is_dir)
+{
+	struct listing *l = ctx;
+	size_t n = strlen(l->from);
+	if (strncmp(path, l->from, n) != 0)
+		return;
+	const char *rel = path + n; /* "/Media/Stage/stg00_03.dat" */
+	const char *slash = strrchr(rel, '/');
+	if (!slash)
+		return;
+	fprintf(l->out, "game%.*s\t%s\t%c\n", (int)(slash - rel), rel, slash + 1, is_dir ? 'd' : 'f');
+	l->lines++;
+}
+
+/* dirs.txt for game/ from the disc image; 0 when written. */
+static int write_listing(const char *iso)
+{
+	char err[512];
+	struct listing l = {fopen(DIRS_PART, "w"), "/LIST", 0};
+	if (!l.out)
+		return -1;
+	fprintf(l.out, "\tgame\td\n");
+	int r = xiso_list(iso, "/LIST", list_entry, &l, err, sizeof err);
+	fclose(l.out);
+	if (r != 0 || rename(DIRS_PART, DIRS_FILE) != 0) {
+		fprintf(stderr, "jsrf: the game's folder listing: %s\n", r ? err : strerror(errno));
+		unlink(DIRS_PART);
+		return -1;
+	}
+	fprintf(stderr, "jsrf: the game's folder listing written: %u entries\n", l.lines + 1);
+	fflush(stderr);
+	return 0;
+}
+
 /* game/ from the disc image in dump/, through game.unpacking/ so a cut-off unpack is never taken for the game. */
 static int import_disc(void)
 {
@@ -159,6 +208,8 @@ static int import_disc(void)
 		fprintf(stderr, "jsrf: %s -> %s: %s\n", UNPACK_DIR, GAME_DIR, strerror(errno));
 		return stay_with("UNPACKING FAILED", "SEE JSRF.LOG IN THE TITLE FOLDER");
 	}
+	if (write_listing(iso) != 0)
+		return stay_with("COULD NOT LIST THE GAME'S FOLDERS", "SEE JSRF.LOG IN THE TITLE FOLDER");
 	fprintf(stderr, "jsrf: the disc image is unpacked; it may be removed from dump/\n");
 	return 0;
 }
@@ -270,6 +321,14 @@ int nv_ps5_main(int argc, char **argv, int (*host)(void))
 		status("LOOKING FOR YOUR DISC IMAGE", NULL, 0);
 		if (import_disc() != 0)
 			return 1;
+	}
+	if (!exists(DIRS_FILE)) {
+		/* unpacked by a build before the listing: made now, from the image if it is still in dump/ */
+		char iso[512];
+		status("LISTING THE GAME'S FOLDERS, ONCE", NULL, 0);
+		if (find_iso(iso, sizeof iso) != 0 || write_listing(iso) != 0)
+			return stay_with("THE GAME NEEDS ITS DISC IMAGE ONCE MORE",
+			                 "PUT THE .ISO BACK IN DUMP/ (OR REMOVE GAME/ TO UNPACK AGAIN)");
 	}
 	char why[640];
 	if (jsrf_xbe_check_folder(GAME_DIR, why, sizeof why) != JSRF_XBE_OK) {

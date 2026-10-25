@@ -12,6 +12,80 @@ index 338ca13..cf975a6 100644
  else()
      target_link_libraries(jsrf_recomp PRIVATE pthread m dl)
      target_link_options(jsrf_recomp PRIVATE -rdynamic)
+diff --git a/port/ios/xiso.c b/port/ios/xiso.c
+index 7fef523..625db96 100644
+--- a/port/ios/xiso.c
++++ b/port/ios/xiso.c
+@@ -113,6 +113,8 @@ typedef struct {
+     unsigned char *buf;
+     char *err;
+     size_t errlen;
++    void (*entry)(void *ctx, const char *path, int is_dir);   /* xiso_list */
++    void *entry_ctx;
+ } Xiso;
+ 
+ static int fail(Xiso *x, const char *fmt, ...)
+@@ -265,6 +267,8 @@ static int walk_entries(Xiso *x, const unsigned char *tab, uint32_t len, uint32_
+         memcpy(child + plen + 1, tab + off + 14, nlen);
+         child[plen + 1 + nlen] = 0;
+ 
++        if (x->counting && x->entry)
++            x->entry(x->entry_ctx, child, (attr & XISO_ATTR_DIR) != 0);
+         if (attr & XISO_ATTR_DIR) {
+             if (!x->counting && mkdir(child, 0755) && errno != EEXIST) {
+                 rc = fail(x, "Could not create the folder %s: %s", child, strerror(errno));
+@@ -480,6 +484,34 @@ int xiso_extract(const char *iso_path, const char *dest_dir,
+     return rc;
+ }
+ 
++/* Every folder and file of the image, as the paths an extract into dest_dir
++ * would write, without writing anything (jsrf-ps5: the PS5 title cannot list
++ * folders, so it keeps a listing of the game's, decision log D15). */
++int xiso_list(const char *iso_path, const char *dest_dir,
++              void (*entry)(void *ctx, const char *path, int is_dir), void *ctx,
++              char *err, size_t errlen)
++{
++    Xiso x;
++    uint32_t root_sector, root_size;
++    int rc;
++
++    memset(&x, 0, sizeof x);
++    x.err = err; x.errlen = errlen;
++    if (err && errlen) err[0] = 0;
++    x.entry = entry; x.entry_ctx = ctx;
++    x.fd = open_image(iso_path);
++    if (x.fd < 0) return fail(&x, "Could not open the disc image: %s", strerror(errno));
++    if (x_fsize(x.fd, &x.size)) { close(x.fd); return fail(&x, "Could not read the disc image: %s", strerror(errno)); }
++    if (!find_volume(x.fd, x.size, &x.base, &root_sector, &root_size)) {
++        close(x.fd);
++        return fail(&x, "That file is not an Xbox disc image.");
++    }
++    x.counting = 1;
++    rc = walk_dir(&x, root_sector, root_size, dest_dir, 0);
++    close(x.fd);
++    return rc;
++}
++
+ #ifdef XISO_MAIN
+ /* A command-line wrapper, for checking this against extract-xiso:
+  *   cc -DXISO_MAIN -o xiso xiso.c && ./xiso game.iso outdir */
+diff --git a/port/ios/xiso.h b/port/ios/xiso.h
+index d68ccf1..914a97a 100644
+--- a/port/ios/xiso.h
++++ b/port/ios/xiso.h
+@@ -31,6 +31,12 @@ int xiso_extract(const char *iso_path, const char *dest_dir,
+ /* 1 if the file looks like an Xbox disc image (either kind), else 0. */
+ int xiso_probe(const char *iso_path);
+ 
++/* Every folder and file of the image, as the paths an extract into dest_dir
++ * would write; nothing is written. */
++int xiso_list(const char *iso_path, const char *dest_dir,
++              void (*entry)(void *ctx, const char *path, int is_dir), void *ctx,
++              char *err, size_t errlen);
++
+ /* The first n bytes of the file (a path or "fd:N", like the calls above),
+  * whatever it is: how many were read, or -1. */
+ long xiso_head(const char *path, unsigned char *buf, size_t n);
 diff --git a/port/main.c b/port/main.c
 index 3ec36d6..010ad1d 100644
 --- a/port/main.c
