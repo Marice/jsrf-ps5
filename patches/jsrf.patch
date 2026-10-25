@@ -443,7 +443,7 @@ index 2381627..702c58a 100644
 +}
 +#endif
 diff --git a/src/kernel/xbox_memory_layout.c b/src/kernel/xbox_memory_layout.c
-index 99d17e7..a5f9321 100644
+index 99d17e7..e87c906 100644
 --- a/src/kernel/xbox_memory_layout.c
 +++ b/src/kernel/xbox_memory_layout.c
 @@ -214,6 +214,27 @@ static void nv2a_kick_signal(void)
@@ -482,11 +482,49 @@ index 99d17e7..a5f9321 100644
  void xbox_nv2a_kick(void)
  {
      if (s_kick_on < 0) { const char *e = getenv("RECOMP_NV2A_KICK"); s_kick_on = e ? atoi(e) : 1; }
-@@ -718,10 +740,70 @@ void xbox_nv2a_vblank_service(void)
+@@ -718,10 +740,109 @@ void xbox_nv2a_vblank_service(void)
      if (g_nv2a_memory) vblank_intr_tick((volatile uint32_t *)g_nv2a_memory);
  }
  
 +#if defined(JSRF_PS5)
++/* The last pushbuffer walks, for a stall (jsrf-ps5 decision log D18): from,
++ * to, what the walk returned (a jump's target, or 0), the kind (L linear, T a
++ * wrap's tail up to its jump, W from the jump's target, S skipped), and the
++ * PUT before and after. */
++static struct { uint32_t from, to, ret, last_put, put; char kind; } s_ps5_walks[16];
++static unsigned s_ps5_walk_n;
++static void ps5_walk_note(uint32_t from, uint32_t to, uint32_t ret, char kind, uint32_t last_put, uint32_t put)
++{
++    unsigned i = s_ps5_walk_n++ % 16u;
++    s_ps5_walks[i].from = from; s_ps5_walks[i].to = to; s_ps5_walks[i].ret = ret;
++    s_ps5_walks[i].kind = kind; s_ps5_walks[i].last_put = last_put; s_ps5_walks[i].put = put;
++}
++void ps5_walk_report(void)
++{
++    volatile uint32_t *regs = (volatile uint32_t *)g_nv2a_memory;
++    unsigned n = s_ps5_walk_n < 16u ? s_ps5_walk_n : 16u, k;
++    fprintf(stderr, "  [STALL] the last %u of %u walks:\n", n, s_ps5_walk_n);
++    for (k = 0; k < n; k++) {
++        unsigned i = (s_ps5_walk_n - n + k) % 16u;
++        fprintf(stderr, "  [STALL]   %c %08X..%08X -> %08X (PUT %08X -> %08X)\n", s_ps5_walks[i].kind,
++                s_ps5_walks[i].from, s_ps5_walks[i].to, s_ps5_walks[i].ret, s_ps5_walks[i].last_put,
++                s_ps5_walks[i].put);
++    }
++    if (regs) {
++        uint32_t put = regs[NV2A_USER_DMA_PUT / 4], get = regs[NV2A_USER_DMA_GET / 4];
++        uint32_t va = XBOX_CONTIG_BASE | (put & 0x0FFFFFFFu);
++        const volatile uint32_t *w = (const volatile uint32_t *)((uintptr_t)va + g_memory_offset);
++        int i;
++        fprintf(stderr, "  [STALL] DMA PUT %08X GET %08X; the 48 words before PUT and 16 after (a NOP(5) is 00040100 00000005):\n  [STALL]  ", put, get);
++        for (i = -48; i < 16; i++) {
++            if (va + (uint32_t)(i * 4) < XBOX_CONTIG_BASE) continue;
++            fprintf(stderr, "%s%08X", i == 0 ? " | " : " ", w[i]);
++            if ((i + 49) % 16 == 0) fprintf(stderr, "\n  [STALL]  ");
++        }
++        fprintf(stderr, "\n");
++    }
++}
++
 +/* One round of the ack thread's handshake work, for a guest thread that spins
 + * on it (jsrf-ps5 decision log D11). On the PS5 the ack thread did not get to
 + * run while a guest thread spun: D3D's interrupt routine waited ~60 ms on the
@@ -542,6 +580,7 @@ index 99d17e7..a5f9321 100644
 +            fprintf(stderr, "  [ACK] %lu rounds in %.0f ms: handshake %.0f ms, walk %.0f ms, wait %.0f ms\n",
 +                    ps5a_rounds, ps5a_t - ps5a_since, ps5a[0], ps5a[1], ps5a[2]);
 +            ps5_method_report();
++            { extern unsigned g_ps5p_frames; if (g_ps5p_frames == 0) ps5_walk_report(); }
 +            ps5_present_report(ps5a_t - ps5a_since);
 +            fflush(stderr);
 +            ps5a[0] = ps5a[1] = ps5a[2] = 0.0;
@@ -553,7 +592,7 @@ index 99d17e7..a5f9321 100644
          vblank_intr_tick(regs);
          for (size_t i = 0; i < sizeof(NV2A_ACK) / sizeof(NV2A_ACK[0]); i++) {
              volatile uint32_t *r =
-@@ -755,6 +837,9 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -755,6 +876,9 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
          counter_mirrors_tick();
          frame_counters_tick();
          framebuffer_probe_tick();
@@ -563,7 +602,39 @@ index 99d17e7..a5f9321 100644
  
          /* Which framebuffer the display would be scanning out.
           *
-@@ -878,6 +963,9 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -793,9 +917,17 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+                      * The contiguous window IS the physical-address view, so
+                      * OR-ing its base is the documented round trip, not a
+                      * guess. */
++#if defined(JSRF_PS5)
++#define PS5_WALKED(f, to_, r, k) ps5_walk_note((f), (to_), (r), (k), last_put, put)
++#else
++#define PS5_WALKED(f, to_, r, k) ((void)0)
++#endif
+                     if (last_put && put > last_put) {
+-                        nv2a_pb_scan(XBOX_CONTIG_BASE | (last_put & 0x0FFFFFFFu),
++                        uint32_t r_ = nv2a_pb_scan(XBOX_CONTIG_BASE | (last_put & 0x0FFFFFFFu),
+                                      XBOX_CONTIG_BASE | (put      & 0x0FFFFFFFu));
++                        PS5_WALKED(XBOX_CONTIG_BASE | (last_put & 0x0FFFFFFFu),
++                                   XBOX_CONTIG_BASE | (put & 0x0FFFFFFFu), r_, 'L');
++                        (void)r_;
+                     } else if (last_put && put < last_put) {
+                         /* The ring wrapped: PUT went back to its start.
+                          * The tail from the old PUT to the jump used to be
+@@ -806,9 +938,11 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+                         uint32_t from = XBOX_CONTIG_BASE | (last_put & 0x0FFFFFFFu);
+                         uint32_t to   = XBOX_CONTIG_BASE | (put      & 0x0FFFFFFFu);
+                         uint32_t j = nv2a_pb_scan(from, from + 0x20000u);
++                        PS5_WALKED(from, from + 0x20000u, j, 'T');
+                         if (j) {
+                             j = XBOX_CONTIG_BASE | (j & 0x0FFFFFFFu);
+-                            if (j < to) nv2a_pb_scan(j, to);
++                            if (j < to) { uint32_t r2_ = nv2a_pb_scan(j, to); PS5_WALKED(j, to, r2_, 'W'); (void)r2_; }
++                            else PS5_WALKED(j, to, 0, 'S');   /* skipped: the jump's target is past the new PUT */
+                         }
+                     }
+                     /* Periodic, because what the title submits at init is not
+@@ -878,6 +1012,9 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
          *(volatile uint32_t *)((uintptr_t)(XBOX_KERNEL_DATA_BASE + KDATA_TICK_COUNT)
                                 + g_memory_offset) = GetTickCount();
  
@@ -573,7 +644,7 @@ index 99d17e7..a5f9321 100644
          /* Yield -- or actually sleep, on a host with fewer cores than the
           * runtime has busy threads. RECOMP_ACK_SLEEP_US=<n> (default 200 on
           * POSIX) keeps this thread from eating a whole core; the pushbuffer
-@@ -905,6 +993,9 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -905,6 +1042,9 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
              else Sleep(0);
  #endif
          }
