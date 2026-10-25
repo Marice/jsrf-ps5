@@ -12,3 +12,5 @@ pkg/
 /background.png
 sce_sys/pic0.dds
 sce_sys/pic1.dds
+build-vk/
+pkg-vk/
