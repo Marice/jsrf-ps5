@@ -233,9 +233,13 @@ static void time_report(void)
 		g_since = now;
 	if (now - g_since < 2000.0)
 		return;
-	fprintf(stderr, "jsrf: present: %u swaps, %.2f ms each; %u SDL_PollEvent calls, %.3f ms each (%.0f ms of %.0f)\n",
+	extern unsigned long g_vblank_count; /* src/kernel/kernel_bridge.c: display interrupts delivered */
+	static unsigned long last_vblanks;
+	fprintf(stderr, "jsrf: present: %u swaps, %.2f ms each; %u SDL_PollEvent calls, %.3f ms each (%.0f ms of %.0f); "
+	        "%.1f vblanks/s\n",
 	        g_swaps, g_swaps ? g_swap_ms / g_swaps : 0.0, g_polls, g_polls ? g_poll_ms / g_polls : 0.0,
-	        g_swap_ms + g_poll_ms, now - g_since);
+	        g_swap_ms + g_poll_ms, now - g_since, (g_vblank_count - last_vblanks) * 1000.0 / (now - g_since));
+	last_vblanks = g_vblank_count;
 	g_swap_ms = g_poll_ms = 0.0;
 	g_swaps = g_polls = 0;
 	g_since = now;

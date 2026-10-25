@@ -10,6 +10,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <pthread.h>
+#include <sched.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -185,6 +186,40 @@ static void log_flexible(const char *when)
 	fflush(stderr);
 }
 
+/* How long the short waits the engine leans on really take here (decision log D8): Sleep(1) in its timer thread,
+   usleep(20) on a critical section's hand-over, sched_yield; 50 of each, the mean and the longest. */
+static double clock_ms(void)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
+}
+
+static void measure_waits(void)
+{
+	static const char *const names[3] = {"nanosleep(1 ms)", "usleep(20)", "sched_yield"};
+	for (int k = 0; k < 3; k++) {
+		double sum = 0.0, worst = 0.0;
+		for (int i = 0; i < 50; i++) {
+			double t0 = clock_ms();
+			if (k == 0) {
+				struct timespec ts = {0, 1000000};
+				nanosleep(&ts, NULL);
+			} else if (k == 1) {
+				usleep(20);
+			} else {
+				sched_yield();
+			}
+			double d = clock_ms() - t0;
+			sum += d;
+			if (d > worst)
+				worst = d;
+		}
+		fprintf(stderr, "jsrf: wait %-16s %.3f ms on average, %.3f ms at most\n", names[k], sum / 50, worst);
+	}
+	fflush(stderr);
+}
+
 int nv_ps5_main(int argc, char **argv, int (*host)(void));
 int nv_ps5_main(int argc, char **argv, int (*host)(void))
 {
@@ -206,6 +241,7 @@ int nv_ps5_main(int argc, char **argv, int (*host)(void))
 	}
 	status("STARTING", NULL, 0);
 	log_flexible("before the engine");
+	measure_waits();
 	/* The status screen's context lets go of the surface on this thread: the renderer makes its own current on its
 	   thread, and EGL refused that while this one was still current here (0x3009, decision log D5). */
 	jsrf_ps5_status_end();
