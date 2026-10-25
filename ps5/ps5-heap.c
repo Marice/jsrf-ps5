@@ -92,6 +92,15 @@ static void *ps5_heap_record_allocation(void *address, size_t size) {
   return address;
 }
 
+/* The heap's use, for the title's periodic memory line (jsrf-ps5 decision log D16). */
+void ps5_heap_numbers(size_t *size, size_t *live, size_t *peak, size_t *blocks, size_t *failures) {
+  *size = ps5_heap_size;
+  *live = atomic_load_explicit(&ps5_heap_live_bytes, memory_order_relaxed);
+  *peak = atomic_load_explicit(&ps5_heap_peak_bytes, memory_order_relaxed);
+  *blocks = atomic_load_explicit(&ps5_heap_blocks, memory_order_relaxed);
+  *failures = atomic_load_explicit(&ps5_heap_failures, memory_order_relaxed);
+}
+
 static int ps5_heap_ready(void) {
   int state = atomic_load_explicit(&ps5_heap_state, memory_order_acquire);
   if (state == 2)

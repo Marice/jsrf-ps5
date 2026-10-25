@@ -792,7 +792,7 @@ int __wrap_pthread_create(pthread_t* thread, const pthread_attr_t* attr,
    each write to the title folder is slow, and upstream flushes stderr after
    many of its lines (249 calls), which turned every line into a write
    (jsrf-ps5 decision log D7). A flush of stderr or stdout here writes the
-   buffer out at most once a second; any other stream is flushed as asked.
+   buffer out at most five times a second; any other stream is flushed as asked.
    A crash, abort or exit flushes for real (__real_fflush, above). */
 int __real_fflush(FILE* stream);
 int __wrap_fflush(FILE* stream)
@@ -803,7 +803,7 @@ int __wrap_fflush(FILE* stream)
 	clock_gettime(CLOCK_MONOTONIC, &now);
 	long long ms = (long long)now.tv_sec * 1000 + now.tv_nsec / 1000000;
 	long long before = __atomic_load_n(&last_ms, __ATOMIC_RELAXED);
-	if (ms - before < 1000) return 0;
+	if (ms - before < 200) return 0; /* five times a second: at most 0.2 s of log lost to a kill (D16) */
 	if (!__atomic_compare_exchange_n(&last_ms, &before, ms, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) return 0;
 	return __real_fflush(stream);
 }

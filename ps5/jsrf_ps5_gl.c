@@ -214,6 +214,11 @@ int __wrap_SDL_GL_MakeCurrent(SDL_Window *window, SDL_GLContext context)
 	return ok ? 0 : -1;
 }
 
+int32_t sceKernelAvailableDirectMemorySize(int64_t start, int64_t end, size_t alignment, int64_t *physical,
+                                           size_t *size);
+int64_t sceKernelGetDirectMemorySize(void);
+int32_t sceKernelAvailableFlexibleMemorySize(size_t *size);
+
 /* Where a present's time goes (decision log D8): the swap and SDL's event pump, timed here, a line every two
    seconds. */
 #include <time.h>
@@ -240,6 +245,18 @@ static void time_report(void)
 	        g_swaps, g_swaps ? g_swap_ms / g_swaps : 0.0, g_polls, g_polls ? g_poll_ms / g_polls : 0.0,
 	        g_swap_ms + g_poll_ms, now - g_since, (g_vblank_count - last_vblanks) * 1000.0 / (now - g_since));
 	last_vblanks = g_vblank_count;
+	/* memory, so a shortage before a crash shows (decision log D16) */
+	{
+		void ps5_heap_numbers(size_t *size, size_t *live, size_t *peak, size_t *blocks, size_t *failures);
+		size_t hs, hl, hp, hb, hf, flexible = 0, largest = 0;
+		int64_t physical = 0;
+		ps5_heap_numbers(&hs, &hl, &hp, &hb, &hf);
+		sceKernelAvailableFlexibleMemorySize(&flexible);
+		sceKernelAvailableDirectMemorySize(0, sceKernelGetDirectMemorySize(), 0, &physical, &largest);
+		fprintf(stderr, "jsrf: memory: heap %zu of %zu MiB live (peak %zu, %zu blocks, %zu refused); flexible %zu MiB "
+		        "free; direct largest free %zu MiB\n", hl >> 20, hs >> 20, hp >> 20, hb, hf, flexible >> 20,
+		        largest >> 20);
+	}
 	g_swap_ms = g_poll_ms = 0.0;
 	g_swaps = g_polls = 0;
 	g_since = now;
