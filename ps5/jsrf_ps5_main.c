@@ -196,6 +196,14 @@ static double clock_ms(void)
 	return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
 }
 
+static void *wake_after_3s(void *cv)
+{
+	struct timespec ts = {3, 0};
+	nanosleep(&ts, NULL);
+	pthread_cond_broadcast(cv);
+	return NULL;
+}
+
 static void measure_waits(void)
 {
 	static const char *const names[3] = {"nanosleep(1 ms)", "usleep(20)", "sched_yield"};
@@ -218,6 +226,34 @@ static void measure_waits(void)
 		}
 		fprintf(stderr, "jsrf: wait %-16s %.3f ms on average, %.3f ms at most\n", names[k], sum / 50, worst);
 	}
+	/* pthread_cond_timedwait with a 200 us deadline on CLOCK_REALTIME, as the engine's ack thread and its Win32
+	   waits use it (decision log D9) */
+	static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+	static pthread_cond_t cv = PTHREAD_COND_INITIALIZER;
+	pthread_t waker; /* wakes the wait after 3 s, should it never time out */
+	pthread_create(&waker, NULL, wake_after_3s, &cv);
+	pthread_detach(waker);
+	double sum = 0.0, worst = 0.0;
+	for (int i = 0; i < 20; i++) {
+		struct timespec ts;
+		clock_gettime(CLOCK_REALTIME, &ts);
+		ts.tv_nsec += 200000L;
+		if (ts.tv_nsec >= 1000000000L) {
+			ts.tv_nsec -= 1000000000L;
+			ts.tv_sec++;
+		}
+		double t0 = clock_ms();
+		pthread_mutex_lock(&mu);
+		pthread_cond_timedwait(&cv, &mu, &ts);
+		pthread_mutex_unlock(&mu);
+		double d = clock_ms() - t0;
+		sum += d;
+		if (d > worst)
+			worst = d;
+		if (d > 2000.0)
+			break; /* it does not time out: enough */
+	}
+	fprintf(stderr, "jsrf: wait %-16s %.3f ms on average, %.3f ms at most\n", "cond 200 us", sum / 20, worst);
 	fflush(stderr);
 }
 

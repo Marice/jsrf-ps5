@@ -239,6 +239,46 @@ index 331d6fe..2e0b256 100644
  }
  /* Stand back for a moment inside a guest spin that has no calls in it.
   *
+diff --git a/src/kernel/xbox_memory_layout.c b/src/kernel/xbox_memory_layout.c
+index 99d17e7..7b4d4da 100644
+--- a/src/kernel/xbox_memory_layout.c
++++ b/src/kernel/xbox_memory_layout.c
+@@ -214,6 +214,27 @@ static void nv2a_kick_signal(void)
+     pthread_mutex_unlock(&s_kick_mu);
+ }
+ /* Sleep up to us microseconds, or until kicked. Returns 1 if kicked. */
++#if defined(JSRF_PS5)
++/* The PS5: not through pthread_cond_timedwait. This thread is what ends the
++ * title's vblank handler's spin, which holds the guest lock while it spins;
++ * on the console the handler held it for 4.8 s of every 5 and the vertical
++ * blank came 8 times a second (jsrf-ps5 decision log D9). Here the thread
++ * looks for a kick between yields (sched_yield is about 4 us here) until the
++ * period is over. It keeps part of a core busy, which the PS5 has. */
++static int nv2a_ack_wait(long us)
++{
++    struct timespec t0, t;
++    clock_gettime(CLOCK_MONOTONIC, &t0);
++    for (;;) {
++        if (__atomic_exchange_n(&s_kick_pending, 0, __ATOMIC_ACQ_REL))
++            return 1;
++        clock_gettime(CLOCK_MONOTONIC, &t);
++        if ((t.tv_sec - t0.tv_sec) * 1000000L + (t.tv_nsec - t0.tv_nsec) / 1000L >= us)
++            return 0;
++        sched_yield();
++    }
++}
++#else
+ static int nv2a_ack_wait(long us)
+ {
+     struct timespec ts;
+@@ -230,6 +251,7 @@ static int nv2a_ack_wait(long us)
+     return kicked;
+ }
+ #endif
++#endif
+ void xbox_nv2a_kick(void)
+ {
+     if (s_kick_on < 0) { const char *e = getenv("RECOMP_NV2A_KICK"); s_kick_on = e ? atoi(e) : 1; }
 diff --git a/src/platform/win32_compat.c b/src/platform/win32_compat.c
 index bb4f68d..53423e5 100644
 --- a/src/platform/win32_compat.c
