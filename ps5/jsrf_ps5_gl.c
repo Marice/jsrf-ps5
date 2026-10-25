@@ -27,6 +27,16 @@ static int egl_open(void)
 		return 0;
 	g_display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
 	EGLint major = 0, minor = 0;
+	/* 4K output (decision log D31): the SDK's runtime display modes (docs/display-modes.md) take 1080p, 1440p or
+	   2160p, set before eglInitialize; the PS5 scales the picture to the TV's own mode. Looked up, so an SDK without
+	   the call keeps 1080p. */
+	{
+		typedef EGLBoolean (*set_mode_fn)(EGLDisplay, EGLint, EGLint);
+		set_mode_fn set_mode = (set_mode_fn)eglGetProcAddress("eglSetDisplayModePS5");
+		EGLBoolean ok = set_mode && g_display != EGL_NO_DISPLAY ? set_mode(g_display, 3840, 2160) : EGL_FALSE;
+		fprintf(stderr, "jsrf: egl: display mode 3840x2160 %s\n",
+		        set_mode ? (ok ? "set" : "refused") : "not offered by this SDK (1080p)");
+	}
 	if (g_display == EGL_NO_DISPLAY || !eglInitialize(g_display, &major, &minor) || !eglBindAPI(EGL_OPENGL_API)) {
 		fprintf(stderr, "jsrf: egl: no display (0x%x)\n", eglGetError());
 		return -1;

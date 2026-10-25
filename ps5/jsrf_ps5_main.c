@@ -47,7 +47,6 @@ static const char *const k_env[][2] = {
 	{"RECOMP_GL_CURTAIN", "skip"}, {"RECOMP_MUTE", "0"}, {"RECOMP_WINDOW", "1"},
 	{"RECOMP_FULLSCREEN", "1"}, {"RECOMP_WINDOW_W", "1920"}, {"RECOMP_WINDOW_H", "1080"},
 	{"SDL_VIDEODRIVER", "offscreen"},
-	{"RECOMP_GL_PROFILE", "1"}, /* this measurement only: where a draw's time goes in the title menu (decision log D29) */
 	{"RECOMP_APU_STATS", "1"}, /* dev builds: the sound ring once a second (decision log D28) */
 
 
@@ -338,15 +337,15 @@ int nv_ps5_main(int argc, char **argv, int (*host)(void))
 		return stay_with("THE GAME FOLDER IS NOT THE USA RELEASE", "REMOVE GAME/ AND PUT THE RIGHT .ISO IN DUMP/");
 	}
 	/* The PS5's defaults, on the first start (decision log D30): widescreen 16:9 (upstream's wider view, not a stretch)
-	   and the picture made at 3x the Xbox's (1920x1440, wider in 16:9), scaled down to the 1080p output. The keys are
+	   and the picture made at 4x the Xbox's (2560x1920, wider in 16:9) for the 2160p output (D31). The keys are
 	   upstream's (nv2a_gl.c sdl_cfg_get); F9/F10 set them on a PC, which a DualSense does not have. A file that is there
 	   is left as it is. */
 	if (!exists(SETTINGS_FILE)) {
 		FILE *f = fopen(SETTINGS_FILE, "w");
 		if (f) {
-			fputs("scale=3\nwidescreen=1\n", f);
+			fputs("scale=4\nwidescreen=1\n", f);
 			fclose(f);
-			fprintf(stderr, "jsrf: settings written: scale 3, widescreen\n");
+			fprintf(stderr, "jsrf: settings written: scale 4, widescreen\n");
 		}
 	}
 	status("STARTING", NULL, 0);
