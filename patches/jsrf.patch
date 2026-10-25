@@ -95,6 +95,93 @@ index 2b3b3f4..e91438d 100644
      # The crypto is the portable code in kernel_crypto.c; OpenSSL is not
      # needed (and on an iPhone or an Android phone not there).
      target_link_libraries(xbox_kernel PUBLIC platform xbox_nv2a_gl)
+diff --git a/src/kernel/kernel_bridge.c b/src/kernel/kernel_bridge.c
+index 331d6fe..6dfae23 100644
+--- a/src/kernel/kernel_bridge.c
++++ b/src/kernel/kernel_bridge.c
+@@ -2919,6 +2919,15 @@ static XboxTimer g_timers[XBOX_MAX_TIMERS];
+ static CRITICAL_SECTION g_timer_lock;
+ static int g_timer_started;
+ 
++#if defined(JSRF_PS5)
++static double ps5_ms(void)
++{
++    LARGE_INTEGER c, f;
++    QueryPerformanceCounter(&c);
++    QueryPerformanceFrequency(&f);
++    return (double)c.QuadPart * 1000.0 / (double)f.QuadPart;
++}
++#endif
+ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
+ {
+     int slot = xbox_worker_stack_alloc();
+@@ -2946,11 +2955,38 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
+         g_fs_base = tib;
+     }
+ 
++#if defined(JSRF_PS5)
++    /* Where a round of this loop goes (jsrf-ps5 decision log D8): 60 vblanks a
++     * second need a round to take a millisecond; on the PS5 it took about
++     * 100. Each step timed, a line every two seconds. */
++    double ps5_t[9] = {0}, ps5_since = 0.0;
++    unsigned long ps5_rounds = 0;
++#define PS5_STEP(k) do { double _n = ps5_ms(); ps5_t[k] += _n - ps5_last; ps5_last = _n; } while (0)
++#else
++#define PS5_STEP(k) ((void)0)
++#endif
+     for (;;) {
+         long long now;
+         int i;
++#if defined(JSRF_PS5)
++        double ps5_last = ps5_ms();
++        if (ps5_since == 0.0) ps5_since = ps5_last;
++        if (ps5_last - ps5_since >= 2000.0) {
++            fprintf(stderr, "  [TIMER] %lu rounds in %.0f ms; ms per round: sleep %.2f, watches %.2f, freeze %.2f, "
++                    "vblank %.2f, pgraph %.2f, apu %.2f, cvfs %.2f, dpcs %.2f, timers %.2f\n",
++                    ps5_rounds, ps5_last - ps5_since,
++                    ps5_t[0] / ps5_rounds, ps5_t[1] / ps5_rounds, ps5_t[2] / ps5_rounds, ps5_t[3] / ps5_rounds,
++                    ps5_t[4] / ps5_rounds, ps5_t[5] / ps5_rounds, ps5_t[6] / ps5_rounds, ps5_t[7] / ps5_rounds,
++                    ps5_t[8] / ps5_rounds);
++            memset(ps5_t, 0, sizeof ps5_t);
++            ps5_rounds = 0;
++            ps5_since = ps5_last;
++        }
++        ps5_rounds++;
++#endif
+ 
+         Sleep(1);
++        PS5_STEP(0);
+         /*
+          * RECOMP_TABLE_WATCH=<addr>,<bytes>,<stride>: catch a pointer table
+          * going bad at the moment it goes bad.
+@@ -3018,12 +3054,19 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
+                 prev_valid = 1;
+             }
+         }
++        PS5_STEP(1);
+         kernel_freeze_watch(); /* has the picture stopped? */
++        PS5_STEP(2);
+         kernel_vblank_tick();  /* the GPU's frame clock */
++        PS5_STEP(3);
+         kernel_pgraph_tick();  /* the GPU's software methods */
++        PS5_STEP(4);
+         kernel_apu_tick();     /* the APU's interrupt line */
++        PS5_STEP(5);
+         kernel_cvfs_watch();   /* CRI's streaming file device */
++        PS5_STEP(6);
+         kernel_drain_dpcs();   /* deferred work, before due timers */
++        PS5_STEP(7);
+         now = (long long)GetTickCount64();
+ 
+         for (i = 0; i < XBOX_MAX_TIMERS; i++) {
+@@ -3047,6 +3090,7 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
+             if (dpc)
+                 kernel_run_dpc(dpc, 0, 0);
+         }
++        PS5_STEP(8);
+     }
+ }
+ 
 diff --git a/src/platform/win32_compat.c b/src/platform/win32_compat.c
 index bb4f68d..53423e5 100644
 --- a/src/platform/win32_compat.c
