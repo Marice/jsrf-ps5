@@ -81,7 +81,7 @@ index 2b3b3f4..e91438d 100644
      # needed (and on an iPhone or an Android phone not there).
      target_link_libraries(xbox_kernel PUBLIC platform xbox_nv2a_gl)
 diff --git a/src/platform/win32_compat.c b/src/platform/win32_compat.c
-index bb4f68d..f16ad34 100644
+index bb4f68d..ad3cd15 100644
 --- a/src/platform/win32_compat.c
 +++ b/src/platform/win32_compat.c
 @@ -36,6 +36,18 @@
@@ -119,7 +119,23 @@ index bb4f68d..f16ad34 100644
      if (base && p != base) { munmap(p, size); return NULL; }
      g_reserved[g_reserved_n].base = p;
      g_reserved[g_reserved_n].size = size;
-@@ -1685,7 +1703,7 @@ VOID DebugBreak(void) {
+@@ -1537,6 +1555,15 @@ LPVOID VirtualAlloc(LPVOID address, SIZE_T size, DWORD allocationType, DWORD pro
+ #endif
+     void *p = mmap(address, size, prot ? prot : PROT_READ | PROT_WRITE,
+                    flags, -1, 0);
++#if defined(JSRF_PS5)
++    /* Anonymous memory is the title's flexible memory, a few hundred MB
++     * (jsrf-ps5 decision log D4): the big ones are logged. */
++    if (size >= (1u << 20)) {
++        fprintf(stderr, "  [VM] VirtualAlloc %zu KiB at %p: %s\n", (size_t)size / 1024,
++                address, p == MAP_FAILED ? strerror(errno) : (owned ? "inside the guest span" : "anonymous"));
++        fflush(stderr);
++    }
++#endif
+     if (p == MAP_FAILED) { SetLastError(8); return NULL; }
+ #if !defined(MAP_FIXED_NOREPLACE)
+     if (owned) return p;
+@@ -1685,7 +1712,7 @@ VOID DebugBreak(void) {
  
  VOID SecureZeroMemory(PVOID ptr, SIZE_T cnt)
  {
@@ -128,7 +144,7 @@ index bb4f68d..f16ad34 100644
      /* Darwin's memset_s is only declared when __STDC_WANT_LIB_EXT1__ is set
       * before every string.h in the translation unit, which is not something a
       * compat header can promise; Android's bionic has no explicit_bzero (and
-@@ -1996,6 +2014,11 @@ static int anon_map_fd(const char *name)
+@@ -1996,6 +2023,11 @@ static int anon_map_fd(const char *name)
              return fd;
          }
      }
@@ -140,7 +156,7 @@ index bb4f68d..f16ad34 100644
  #else
      return memfd_create(name ? name : "xbox_map", 0);
  #endif
-@@ -2126,6 +2149,18 @@ BOOL GlobalMemoryStatusEx(LPMEMORYSTATUSEX b)
+@@ -2126,6 +2158,18 @@ BOOL GlobalMemoryStatusEx(LPMEMORYSTATUSEX b)
          b->ullTotalPageFile = b->ullTotalPhys;
          b->ullAvailPageFile = b->ullAvailPhys;
      }

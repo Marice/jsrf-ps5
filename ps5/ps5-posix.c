@@ -698,6 +698,9 @@ static void* thread_trampoline(void* opaque)
 	return launch.start(launch.arg);
 }
 
+int32_t sceKernelAvailableFlexibleMemorySize(size_t* size);
+int32_t sceKernelConfiguredFlexibleMemorySize(size_t* size);
+
 int __wrap_pthread_create(pthread_t* thread, const pthread_attr_t* attr,
                           void* (*start)(void*), void* arg)
 {
@@ -726,7 +729,14 @@ int __wrap_pthread_create(pthread_t* thread, const pthread_attr_t* attr,
 	if (use == &own) pthread_attr_destroy(&own);
 	if (result != 0) {
 		free(launch);
-		fprintf(stderr, "jsrf: pthread_create failed (%d)\n", result);
+		/* Where the stack would have come from: the title's flexible memory (jsrf-ps5 decision log D4). */
+		size_t flexible = 0, configured = 0;
+		sceKernelAvailableFlexibleMemorySize(&flexible);
+		sceKernelConfiguredFlexibleMemorySize(&configured);
+		fprintf(stderr, "jsrf: pthread_create failed (%d): stack %zu KiB, called from %p (this function at %p); "
+		        "flexible memory %zu of %zu MiB free\n", result, size / 1024, __builtin_return_address(0),
+		        (void*)&__wrap_pthread_create, flexible >> 20, configured >> 20);
+		fflush(stderr);
 	}
 	return result;
 }
