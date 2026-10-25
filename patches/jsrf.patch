@@ -327,6 +327,55 @@ index 331d6fe..4e9e403 100644
  static volatile unsigned g_lock_owner_irql;
  /* Interrupts delivered from inside a spin rather than on the timer thread. */
  static unsigned long g_spin_isrs;
+diff --git a/src/kernel/kernel_path.c b/src/kernel/kernel_path.c
+index 8ec1ea0..2282acd 100644
+--- a/src/kernel/kernel_path.c
++++ b/src/kernel/kernel_path.c
+@@ -628,6 +628,11 @@ static void resolve_case(char *path, const char *base)
+     size_t blen;
+     char *p;
+     if (!base || !*base || lstat(path, &st) == 0) return;
++#if defined(JSRF_PS5)
++    { static unsigned said;   /* why a case lookup fails here (jsrf-ps5 decision log D28) */
++      if (errno != ENOENT && errno != ENOTDIR && said++ < 8)
++          fprintf(stderr, "  [CASE] %s: lstat errno %d, so not looked up\n", path, errno); }
++#endif
+     if (errno != ENOENT && errno != ENOTDIR) return;
+     blen = strlen(base);
+     if (strncmp(path, base, blen) != 0) return;
+@@ -644,15 +649,31 @@ static void resolve_case(char *path, const char *base)
+             *sep = '\0';
+             d = opendir(path[0] ? path : "/");
+             *sep = '/';
++#if defined(JSRF_PS5)
++            int listed = 0, opened = d != NULL, open_errno = d ? 0 : errno;
++#endif
+             if (d) {
+-                while ((e = readdir(d)) != NULL)
++                while ((e = readdir(d)) != NULL) {
++#if defined(JSRF_PS5)
++                    listed++;
++#endif
+                     if (!strcasecmp(e->d_name, p)) {
+                         memcpy(p, e->d_name, strlen(p));
+                         found = 1;
+                         break;
+                     }
++                }
+                 closedir(d);
+             }
++#if defined(JSRF_PS5)
++            { static unsigned said;
++              if (!found && said++ < 12) {
++                  *sep = '\0';
++                  fprintf(stderr, "  [CASE] '%s' not found in %s: opendir %s (errno %d), %d entries read\n",
++                          p, path[0] ? path : "/", opened ? "ok" : "refused", open_errno, listed);
++                  *sep = '/';
++              } }
++#endif
+             if (!found) { if (slash) *slash = '/'; return; }
+         }
+         if (!slash) return;
 diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
 index 2381627..9a46a58 100644
 --- a/src/kernel/nv2a_pb_exec.c
