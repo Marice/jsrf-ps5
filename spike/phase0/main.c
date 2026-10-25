@@ -110,13 +110,59 @@ static int write_faults(volatile uint8_t *p)
 
 /* ---- 1 and 2: the guest address space ---- */
 
+int32_t sceKernelReserveVirtualRange(void **address, size_t length, int flags, size_t alignment);
+
+static uint64_t g_span_size;
+
+/* The largest PROT_NONE mmap the title gets, to the nearest power of two from 64 MB (logged). */
+static void probe_mmap_limit(void)
+{
+	uint64_t ok = 0;
+	for (uint64_t size = 64ull << 20; size <= SPAN; size <<= 1) {
+		void *p = mmap(NULL, size, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+		if (p == MAP_FAILED)
+			break;
+		munmap(p, size);
+		ok = size;
+	}
+	fprintf(stderr, "jsrf: the largest PROT_NONE mmap: %llu MB\n", (unsigned long long)(ok >> 20));
+}
+
 static uint8_t *reserve_span(void)
 {
-	/* FreeBSD has no MAP_NORESERVE (upstream passes it on Linux): a PROT_NONE mapping commits nothing anyway. */
-	void *p = mmap(NULL, SPAN, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+	/* a: the PS5's own call for address space without memory (as the PS4's): nothing is committed */
+	void *p = NULL;
+	int32_t r = sceKernelReserveVirtualRange(&p, SPAN, 0, 64 * 1024);
+	result("1a reserve 4 GB (sce)", r == 0, "(result 0x%x; at %p)", (unsigned)r, r == 0 ? p : NULL);
+	if (r == 0) {
+		g_span_size = SPAN;
+		return p;
+	}
+	/* b: what upstream does; FreeBSD has no MAP_NORESERVE, and PROT_NONE commits nothing anyway */
+	p = mmap(NULL, SPAN, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
 	int e = errno;
-	result("1 reserve 4 GB", p != MAP_FAILED, "(at %p; errno %d)", p == MAP_FAILED ? NULL : p, p == MAP_FAILED ? e : 0);
-	return p == MAP_FAILED ? NULL : p;
+	result("1b reserve 4 GB (mmap)", p != MAP_FAILED, "(at %p; errno %d)", p == MAP_FAILED ? NULL : p,
+	       p == MAP_FAILED ? e : 0);
+	if (p != MAP_FAILED) {
+		g_span_size = SPAN;
+		return p;
+	}
+	probe_mmap_limit();
+	/* c: a smaller span, so the views are still checked (without the aperture) */
+	for (uint64_t size = 1ull << 30; size >= 2 * GUEST_RAM; size >>= 1) {
+		p = NULL;
+		r = sceKernelReserveVirtualRange(&p, size, 0, 64 * 1024);
+		if (r != 0) {
+			p = mmap(NULL, size, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+			if (p == MAP_FAILED)
+				continue;
+		}
+		fprintf(stderr, "jsrf: a %llu MB span for the views instead (%s)\n", (unsigned long long)(size >> 20),
+		        r == 0 ? "sce" : "mmap");
+		g_span_size = size;
+		return p;
+	}
+	return NULL;
 }
 
 /* Puts one view of the backing at span + offset; 0 on success, else errno. */
@@ -158,21 +204,24 @@ static void check_views(const char *name, uint8_t *span, map_view_fn map_view, v
 	static const uint64_t offsets[3] = {0, GUEST_RAM, APERTURE};
 	static const char *const labels[3] = {"base", "mirror +64MB", "aperture +0xF0000000"};
 	char check[64];
-	for (int i = 0; i < 3; i++) {
+	int views = g_span_size >= APERTURE + GUEST_RAM ? 3 : 2;
+	if (views == 2)
+		fprintf(stderr, "jsrf: the span is smaller than 4 GB: the aperture is not checked\n");
+	for (int i = 0; i < views; i++) {
 		int r = map_view(span + offsets[i], backing);
 		snprintf(check, sizeof check, "2%s map %s", name, labels[i]);
 		result(check, r == 0, "(at %p; result %d)", (void *)(span + offsets[i]), r);
 		if (r != 0)
 			return;
 	}
-	double times[3];
-	for (int i = 0; i < 3; i++) {
+	double times[3] = {0, 0, 0};
+	for (int i = 0; i < views; i++) {
 		double t0 = now_seconds();
-		memset(span + offsets[i], 0x11 * (i + 1), GUEST_RAM);
+		memset(span + offsets[i], i == views - 1 ? 0x33 : 0x11 * (i + 1), GUEST_RAM);
 		times[i] = (now_seconds() - t0) * 1000.0;
 	}
 	/* the last memset wrote 0x33 everywhere; every view must see it, and a write at the base shows at the others */
-	volatile uint8_t *base = span, *mirror = span + GUEST_RAM, *aperture = span + APERTURE;
+	volatile uint8_t *base = span, *mirror = span + GUEST_RAM, *aperture = views == 3 ? span + APERTURE : mirror;
 	base[0x448] = 0xa5;
 	mirror[0x1000] = 0x5a;
 	int alias = base[0x10] == 0x33 && mirror[0x448] == 0xa5 && aperture[0x448] == 0xa5 && aperture[0x1000] == 0x5a &&
@@ -192,7 +241,12 @@ static void check_views(const char *name, uint8_t *span, map_view_fn map_view, v
 /* Puts the span back to PROT_NONE between backings. */
 static void clear_span(uint8_t *span)
 {
-	mmap(span, SPAN, PROT_NONE, MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0);
+	/* each view goes back to a reservation of its own size, so the span stays the title's */
+	for (uint64_t off = 0; off < g_span_size; off += GUEST_RAM)
+		munmap(span + off, GUEST_RAM);
+	void *again = span;
+	if (sceKernelReserveVirtualRange(&again, g_span_size, SCE_KERNEL_MAP_FIXED, 64 * 1024) != 0)
+		mmap(span, g_span_size, PROT_NONE, MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0);
 }
 
 static void check_memory(void)
@@ -236,7 +290,7 @@ static void check_memory(void)
 		clear_span(span);
 		sceKernelReleaseDirectMemory(physical, GUEST_RAM);
 	}
-	munmap(span, SPAN);
+	munmap(span, g_span_size);
 }
 
 /* ---- 3: OpenGL 3.3 core ---- */
