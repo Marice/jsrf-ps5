@@ -171,12 +171,23 @@ static void *host_thread(void *p)
 	return NULL;
 }
 
+int32_t sceKernelAvailableFlexibleMemorySize(size_t *size);
+
+static void log_flexible(const char *when)
+{
+	size_t free_size = 0;
+	sceKernelAvailableFlexibleMemorySize(&free_size);
+	fprintf(stderr, "jsrf: flexible memory %zu MiB free %s\n", free_size >> 20, when);
+	fflush(stderr);
+}
+
 int nv_ps5_main(int argc, char **argv, int (*host)(void));
 int nv_ps5_main(int argc, char **argv, int (*host)(void))
 {
 	(void)argc;
 	(void)argv;
 	fprintf(stderr, "jsrf: JSRF Unleashed %s for PS5\n", JSRF_VERSION);
+	log_flexible("at the start");
 	if (jsrf_ps5_status_begin() != 0)
 		return 1;
 	if (!exists(GAME_DIR "/default.xbe")) {
@@ -190,6 +201,7 @@ int nv_ps5_main(int argc, char **argv, int (*host)(void))
 		return stay_with("THE GAME FOLDER IS NOT THE USA RELEASE", "REMOVE GAME/ AND PUT THE RIGHT .ISO IN DUMP/");
 	}
 	status("STARTING", NULL, 0);
+	log_flexible("before the engine");
 	mkdir(SAVE_DIR, 0755);
 	chdir(GAME_DIR);
 

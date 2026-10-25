@@ -81,7 +81,7 @@ index 2b3b3f4..e91438d 100644
      # needed (and on an iPhone or an Android phone not there).
      target_link_libraries(xbox_kernel PUBLIC platform xbox_nv2a_gl)
 diff --git a/src/platform/win32_compat.c b/src/platform/win32_compat.c
-index bb4f68d..ad3cd15 100644
+index bb4f68d..4c8535c 100644
 --- a/src/platform/win32_compat.c
 +++ b/src/platform/win32_compat.c
 @@ -36,6 +36,18 @@
@@ -119,7 +119,145 @@ index bb4f68d..ad3cd15 100644
      if (base && p != base) { munmap(p, size); return NULL; }
      g_reserved[g_reserved_n].base = p;
      g_reserved[g_reserved_n].size = size;
-@@ -1537,6 +1555,15 @@ LPVOID VirtualAlloc(LPVOID address, SIZE_T size, DWORD allocationType, DWORD pro
+@@ -1517,11 +1535,137 @@ static int protect_within_host_pages(void *addr, size_t size, int prot)
+     return mprotect((void *)lo, (size_t)(hi - lo), prot);
+ }
+ 
++#if defined(JSRF_PS5)
++/* ---- the PS5: committed memory from direct memory -------------------------
++ *
++ * An anonymous mmap on the PS5 is the title's flexible memory, 448 MiB, which
++ * also holds every thread's stack; upstream's VirtualAllocs (the 64 MB NV2A
++ * VRAM and the rest, even inside the reserved guest span) used it up until a
++ * thread could not start (jsrf-ps5 decision log D4). Committed memory comes
++ * from direct memory instead, as the title's heap does (ps5/ps5-heap.c):
++ * allocated, then mapped where it was asked for (inside the span: at that
++ * address, as phase 0's check 2c showed works) or where the kernel puts it.
++ * Each mapping is kept here, so VirtualFree can give it back and a commit on
++ * memory that is already mapped only changes its protection. */
++int32_t sceKernelAllocateDirectMemory(int64_t search_start, int64_t search_end, size_t length, size_t alignment,
++                                      int memory_type, int64_t *physical_start);
++int32_t sceKernelMapDirectMemory(void **address, size_t length, int protection, int flags, int64_t physical_start,
++                                 size_t alignment);
++int32_t sceKernelReleaseDirectMemory(int64_t physical_start, size_t length);
++int32_t sceKernelAvailableFlexibleMemorySize(size_t *size);
++
++#define PS5_DIRECT_ALIGN ((size_t)64 * 1024)
++#define PS5_DIRECT_MAX 512
++static struct { uintptr_t base; size_t size; int64_t physical; } s_direct[PS5_DIRECT_MAX];
++static pthread_mutex_t s_direct_lock = PTHREAD_MUTEX_INITIALIZER;
++
++static int ps5_direct_covers(const void *address, size_t size)
++{
++    uintptr_t a = (uintptr_t)address;
++    int found = 0;
++    pthread_mutex_lock(&s_direct_lock);
++    for (int i = 0; i < PS5_DIRECT_MAX && !found; i++)
++        if (s_direct[i].size && a >= s_direct[i].base && a + size <= s_direct[i].base + s_direct[i].size)
++            found = 1;
++    pthread_mutex_unlock(&s_direct_lock);
++    return found;
++}
++
++/* Maps size bytes of fresh direct memory at address (fixed) or anywhere (NULL); NULL when it cannot. */
++static void *ps5_direct_alloc(void *address, size_t size, int prot)
++{
++    size_t length = (size + PS5_DIRECT_ALIGN - 1) & ~(PS5_DIRECT_ALIGN - 1);
++    if (address && ((uintptr_t)address & (PS5_DIRECT_ALIGN - 1)))
++        return NULL; /* the kernel maps direct memory at 64 KB steps: such a caller keeps upstream's path */
++    int64_t physical = 0;
++    if (sceKernelAllocateDirectMemory(0, sceKernelGetDirectMemorySize(), length, PS5_DIRECT_ALIGN, 12,
++                                      &physical) != 0)
++        return NULL;
++    void *mapped = address;
++    if (sceKernelMapDirectMemory(&mapped, length, prot ? prot : PROT_READ | PROT_WRITE, address ? 0x10 : 0,
++                                 physical, PS5_DIRECT_ALIGN) != 0 || !mapped || (address && mapped != address)) {
++        sceKernelReleaseDirectMemory(physical, length);
++        return NULL;
++    }
++    memset(mapped, 0, length); /* VirtualAlloc's memory starts zeroed */
++    pthread_mutex_lock(&s_direct_lock);
++    for (int i = 0; i < PS5_DIRECT_MAX; i++)
++        if (!s_direct[i].size) {
++            s_direct[i].base = (uintptr_t)mapped;
++            s_direct[i].size = length;
++            s_direct[i].physical = physical;
++            break;
++        }
++    pthread_mutex_unlock(&s_direct_lock);
++    return mapped;
++}
++
++/* Gives back the direct mapping that starts at address; 0 when there is none. */
++static int ps5_direct_release(void *address)
++{
++    int64_t physical = -1;
++    size_t size = 0;
++    pthread_mutex_lock(&s_direct_lock);
++    for (int i = 0; i < PS5_DIRECT_MAX; i++)
++        if (s_direct[i].size && s_direct[i].base == (uintptr_t)address) {
++            physical = s_direct[i].physical;
++            size = s_direct[i].size;
++            s_direct[i].size = 0;
++            break;
++        }
++    pthread_mutex_unlock(&s_direct_lock);
++    if (!size)
++        return 0;
++    if (inside_reservation(address, size)) {
++        /* back to a reservation, so the guest span stays the title's */
++        void *again = address;
++        munmap(address, size);
++        sceKernelReserveVirtualRange(&again, size, 0x10, PS5_DIRECT_ALIGN);
++    } else {
++        munmap(address, size);
++    }
++    sceKernelReleaseDirectMemory(physical, size);
++    return 1;
++}
++
++static size_t ps5_flexible_free(void)
++{
++    size_t free_size = 0;
++    sceKernelAvailableFlexibleMemorySize(&free_size);
++    return free_size;
++}
++#endif
++
+ LPVOID VirtualAlloc(LPVOID address, SIZE_T size, DWORD allocationType, DWORD protect)
+ {
+     int prot  = prot_from_page(protect);
+     int flags = MAP_PRIVATE | MAP_ANONYMOUS;
+ 
++#if defined(JSRF_PS5)
++    {
++        /* A reservation without memory: address space only. */
++        if ((allocationType & MEM_RESERVE) && !(allocationType & MEM_COMMIT)) {
++            void *p = address;
++            if (sceKernelReserveVirtualRange(&p, (size + PS5_DIRECT_ALIGN - 1) & ~(PS5_DIRECT_ALIGN - 1),
++                                             address ? 0x10 : 0, PS5_DIRECT_ALIGN) == 0)
++                return p;
++        } else if (address && ps5_direct_covers(address, size)) {
++            /* a commit on memory that is mapped already: its protection */
++            if (protect_within_host_pages(address, size, prot ? prot : PROT_READ | PROT_WRITE) == 0)
++                return address;
++        } else if (!address || inside_reservation(address, size)) {
++            void *p = ps5_direct_alloc(address, size, prot);
++            if (size >= (1u << 20)) {
++                fprintf(stderr, "  [VM] VirtualAlloc %zu KiB at %p: direct memory %s (flexible %zu MiB free)\n",
++                        (size_t)size / 1024, address, p ? "mapped" : "refused", ps5_flexible_free() >> 20);
++                fflush(stderr);
++            }
++            if (p)
++                return p;
++        }
++        /* anything else: upstream's anonymous mmap below */
++    }
++#endif
+     /* MEM_COMMIT on a region already reserved by a prior VirtualAlloc:
+      * just adjust protection. */
+     if ((allocationType & MEM_COMMIT) && !(allocationType & MEM_RESERVE) && address) {
+@@ -1537,6 +1681,16 @@ LPVOID VirtualAlloc(LPVOID address, SIZE_T size, DWORD allocationType, DWORD pro
  #endif
      void *p = mmap(address, size, prot ? prot : PROT_READ | PROT_WRITE,
                     flags, -1, 0);
@@ -127,15 +265,26 @@ index bb4f68d..ad3cd15 100644
 +    /* Anonymous memory is the title's flexible memory, a few hundred MB
 +     * (jsrf-ps5 decision log D4): the big ones are logged. */
 +    if (size >= (1u << 20)) {
-+        fprintf(stderr, "  [VM] VirtualAlloc %zu KiB at %p: %s\n", (size_t)size / 1024,
-+                address, p == MAP_FAILED ? strerror(errno) : (owned ? "inside the guest span" : "anonymous"));
++        fprintf(stderr, "  [VM] VirtualAlloc %zu KiB at %p: anonymous mmap %s (flexible %zu MiB free)\n",
++                (size_t)size / 1024, address, p == MAP_FAILED ? strerror(errno) : (owned ? "inside the guest span" : "elsewhere"),
++                ps5_flexible_free() >> 20);
 +        fflush(stderr);
 +    }
 +#endif
      if (p == MAP_FAILED) { SetLastError(8); return NULL; }
  #if !defined(MAP_FIXED_NOREPLACE)
      if (owned) return p;
-@@ -1685,7 +1712,7 @@ VOID DebugBreak(void) {
+@@ -1559,6 +1713,9 @@ LPVOID VirtualAlloc(LPVOID address, SIZE_T size, DWORD allocationType, DWORD pro
+ BOOL VirtualFree(LPVOID address, SIZE_T size, DWORD freeType)
+ {
+     if (freeType & MEM_RELEASE) {
++#if defined(JSRF_PS5)
++        if (ps5_direct_release(address)) return TRUE;
++#endif
+         /* Win32 MEM_RELEASE passes size 0; we can't know the length, so this
+          * path is only safe when callers pass the real size. */
+         if (size == 0) return TRUE;
+@@ -1685,7 +1842,7 @@ VOID DebugBreak(void) {
  
  VOID SecureZeroMemory(PVOID ptr, SIZE_T cnt)
  {
@@ -144,7 +293,7 @@ index bb4f68d..ad3cd15 100644
      /* Darwin's memset_s is only declared when __STDC_WANT_LIB_EXT1__ is set
       * before every string.h in the translation unit, which is not something a
       * compat header can promise; Android's bionic has no explicit_bzero (and
-@@ -1996,6 +2023,11 @@ static int anon_map_fd(const char *name)
+@@ -1996,6 +2153,11 @@ static int anon_map_fd(const char *name)
              return fd;
          }
      }
@@ -156,7 +305,21 @@ index bb4f68d..ad3cd15 100644
  #else
      return memfd_create(name ? name : "xbox_map", 0);
  #endif
-@@ -2126,6 +2158,18 @@ BOOL GlobalMemoryStatusEx(LPMEMORYSTATUSEX b)
+@@ -2055,6 +2217,13 @@ LPVOID MapViewOfFileEx(HANDLE mapping, DWORD access, DWORD offHigh, DWORD offLow
+     int owned = inside_reservation(baseAddr, len);
+     void *p = mmap(baseAddr, len, prot,
+                    MAP_SHARED | (owned ? MAP_FIXED : 0), o->fd, off);
++#if defined(JSRF_PS5)
++    if (len >= (1u << 20)) {
++        fprintf(stderr, "  [VM] view %zu KiB at %p: %s (flexible %zu MiB free)\n", (size_t)len / 1024, baseAddr,
++                p == MAP_FAILED ? strerror(errno) : "mapped", ps5_flexible_free() >> 20);
++        fflush(stderr);
++    }
++#endif
+     if (p == MAP_FAILED) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); return NULL; }
+     if (!owned && baseAddr && p != baseAddr) {
+         munmap(p, len);
+@@ -2126,6 +2295,18 @@ BOOL GlobalMemoryStatusEx(LPMEMORYSTATUSEX b)
          b->ullTotalPageFile = b->ullTotalPhys;
          b->ullAvailPageFile = b->ullAvailPhys;
      }

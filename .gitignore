@@ -8,3 +8,7 @@ src-upstream/
 pkg/
 *:Zone.Identifier
 .venv/
+/icon.png
+/background.png
+sce_sys/pic0.dds
+sce_sys/pic1.dds
