@@ -302,8 +302,74 @@ index 331d6fe..4e5242c 100644
      if (!t_guest_holds || t_in_callback) return;
      g_lock_owner_edge = va;
      if ((++g_recomp_tick & 0xFFu) != 0u) return;
+diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
+index 2381627..702c58a 100644
+--- a/src/kernel/nv2a_pb_exec.c
++++ b/src/kernel/nv2a_pb_exec.c
+@@ -1494,7 +1494,15 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+      * stream as the title wrote it, not the subset that can be rasterised in
+      * software. Returns immediately unless RECOMP_GL is set. */
+     if (nv2a_gl_enabled() && subch == 0) {
++#if defined(JSRF_PS5)
++        { extern double ps5_prof_ms(void);
++          extern void ps5_method_note(uint32_t method, double ms);
++          double _t0 = ps5_prof_ms();
++          nv2a_gl_method(method, param);
++          ps5_method_note(method, ps5_prof_ms() - _t0); }
++#else
+         nv2a_gl_method(method, param);
++#endif
+         /*
+          * With GL rendering, everything below this line is dead weight.
+          *
+@@ -1957,3 +1965,45 @@ void nv2a_pb_exec_report(void)
+     }
+     }    fflush(stderr);
+ }
++
++#if defined(JSRF_PS5)
++/* Which GL methods the walk's time goes to (jsrf-ps5 decision log D13). */
++static struct { uint32_t method; double ms; unsigned n; } s_ps5_methods[64];
++static double s_ps5_method_ms;
++static unsigned s_ps5_method_n;
++void ps5_method_note(uint32_t method, double ms);
++void ps5_method_note(uint32_t method, double ms)
++{
++    unsigned h = (method >> 2) & 63u, i;
++    s_ps5_method_ms += ms;
++    s_ps5_method_n++;
++    for (i = 0; i < 64; i++) {
++        unsigned k = (h + i) & 63u;
++        if (s_ps5_methods[k].n == 0 || s_ps5_methods[k].method == method) {
++            s_ps5_methods[k].method = method;
++            s_ps5_methods[k].ms += ms;
++            s_ps5_methods[k].n++;
++            return;
++        }
++    }
++}
++void ps5_method_report(void);
++void ps5_method_report(void)
++{
++    int shown, i;
++    fprintf(stderr, "  [METHODS] %u methods, %.1f ms in all; the costliest:", s_ps5_method_n, s_ps5_method_ms);
++    for (shown = 0; shown < 8; shown++) {
++        int best = -1;
++        for (i = 0; i < 64; i++)
++            if (s_ps5_methods[i].n && (best < 0 || s_ps5_methods[i].ms > s_ps5_methods[best].ms)) best = i;
++        if (best < 0) break;
++        fprintf(stderr, " 0x%04X %.1f ms/%u;", (unsigned)s_ps5_methods[best].method, s_ps5_methods[best].ms,
++                s_ps5_methods[best].n);
++        s_ps5_methods[best].n = 0;
++    }
++    fprintf(stderr, "\n");
++    memset(s_ps5_methods, 0, sizeof s_ps5_methods);
++    s_ps5_method_ms = 0.0;
++    s_ps5_method_n = 0;
++}
++#endif
 diff --git a/src/kernel/xbox_memory_layout.c b/src/kernel/xbox_memory_layout.c
-index 99d17e7..4fd1043 100644
+index 99d17e7..0d0af9f 100644
 --- a/src/kernel/xbox_memory_layout.c
 +++ b/src/kernel/xbox_memory_layout.c
 @@ -214,6 +214,27 @@ static void nv2a_kick_signal(void)
@@ -342,7 +408,7 @@ index 99d17e7..4fd1043 100644
  void xbox_nv2a_kick(void)
  {
      if (s_kick_on < 0) { const char *e = getenv("RECOMP_NV2A_KICK"); s_kick_on = e ? atoi(e) : 1; }
-@@ -718,6 +740,45 @@ void xbox_nv2a_vblank_service(void)
+@@ -718,10 +740,74 @@ void xbox_nv2a_vblank_service(void)
      if (g_nv2a_memory) vblank_intr_tick((volatile uint32_t *)g_nv2a_memory);
  }
  
@@ -388,6 +454,188 @@ index 99d17e7..4fd1043 100644
  static DWORD WINAPI nv2a_ack_thread(LPVOID param)
  {
      volatile uint32_t *regs = (volatile uint32_t *)param;
++#if defined(JSRF_PS5)
++    /* Where this thread's time goes (jsrf-ps5 decision log D13): its
++     * handshake work, the pushbuffer walk (which runs the GL renderer), and
++     * its wait; a line every two seconds, with the methods and the present. */
++    extern double ps5_prof_ms(void);
++    extern void ps5_method_report(void);
++    extern void ps5_present_report(double span_ms);
++    double ps5a[3] = {0, 0, 0}, ps5a_since = 0.0, ps5a_t;
++    unsigned long ps5a_rounds = 0;
++#endif
+     while (!InterlockedCompareExchange(&g_nv2a_ack_stop, 0, 0)) {
++#if defined(JSRF_PS5)
++        ps5a_t = ps5_prof_ms();
++        if (ps5a_since == 0.0) ps5a_since = ps5a_t;
++        if (ps5a_t - ps5a_since >= 2000.0) {
++            fprintf(stderr, "  [ACK] %lu rounds in %.0f ms: handshake %.0f ms, walk %.0f ms, wait %.0f ms\n",
++                    ps5a_rounds, ps5a_t - ps5a_since, ps5a[0], ps5a[1], ps5a[2]);
++            ps5_method_report();
++            ps5_present_report(ps5a_t - ps5a_since);
++            fflush(stderr);
++            ps5a[0] = ps5a[1] = ps5a[2] = 0.0;
++            ps5a_rounds = 0;
++            ps5a_since = ps5a_t;
++        }
++        ps5a_rounds++;
++#endif
+         vblank_intr_tick(regs);
+         for (size_t i = 0; i < sizeof(NV2A_ACK) / sizeof(NV2A_ACK[0]); i++) {
+             volatile uint32_t *r =
+@@ -755,6 +841,9 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+         counter_mirrors_tick();
+         frame_counters_tick();
+         framebuffer_probe_tick();
++#if defined(JSRF_PS5)
++        { double _n = ps5_prof_ms(); ps5a[0] += _n - ps5a_t; ps5a_t = _n; }
++#endif
+ 
+         /* Which framebuffer the display would be scanning out.
+          *
+@@ -878,6 +967,9 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+         *(volatile uint32_t *)((uintptr_t)(XBOX_KERNEL_DATA_BASE + KDATA_TICK_COUNT)
+                                + g_memory_offset) = GetTickCount();
+ 
++#if defined(JSRF_PS5)
++        { double _n = ps5_prof_ms(); ps5a[1] += _n - ps5a_t; ps5a_t = _n; }
++#endif
+         /* Yield -- or actually sleep, on a host with fewer cores than the
+          * runtime has busy threads. RECOMP_ACK_SLEEP_US=<n> (default 200 on
+          * POSIX) keeps this thread from eating a whole core; the pushbuffer
+@@ -905,6 +997,9 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+             else Sleep(0);
+ #endif
+         }
++#if defined(JSRF_PS5)
++        ps5a[2] += ps5_prof_ms() - ps5a_t;
++#endif
+     }
+     return 0;
+ }
+diff --git a/src/nv2a_gl/nv2a_gl.c b/src/nv2a_gl/nv2a_gl.c
+index 75b66db..7f132c7 100644
+--- a/src/nv2a_gl/nv2a_gl.c
++++ b/src/nv2a_gl/nv2a_gl.c
+@@ -1757,18 +1757,53 @@ static void sdl_menu_command(unsigned id)
+  * 16:9 (the 640x480 surface holds a 16:9 view squeezed), anything else at its
+  * own shape. One blit; every piece of GL state the renderer caches is put
+  * back the way it was. */
++#if defined(JSRF_PS5)
++/* Where a present's time goes, step by step (jsrf-ps5 decision log D13):
++ * the renderer's profile put 98.8% of its time in "present" while the swap
++ * itself took 0.07 ms. */
++double ps5_prof_ms(void)
++{
++    struct timespec ts;
++    clock_gettime(CLOCK_MONOTONIC, &ts);
++    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
++}
++enum { PS5P_FBO, PS5P_QUERY, PS5P_CLEAR, PS5P_BLIT, PS5P_SWAP, PS5P_RESTORE, PS5P_PUMP, PS5P_DEVICE,
++       PS5P_PACE, PS5P_AA, PS5P_N };
++static const char *const ps5p_name[PS5P_N] = { "fbo", "queries", "clear", "blit", "swap", "restore", "pump",
++                                               "device", "pace", "aa" };
++double g_ps5p[PS5P_N];
++unsigned g_ps5p_frames;
++void ps5_present_report(double span_ms)
++{
++    int i;
++    fprintf(stderr, "  [PRESENT] %u frames in %.0f ms; ms per frame:", g_ps5p_frames, span_ms);
++    for (i = 0; i < PS5P_N; i++)
++        fprintf(stderr, " %s %.2f", ps5p_name[i], g_ps5p_frames ? g_ps5p[i] / g_ps5p_frames : 0.0);
++    fprintf(stderr, "\n");
++    memset(g_ps5p, 0, sizeof g_ps5p);
++    g_ps5p_frames = 0;
++}
++#define PS5P_T(k) do { double _n = ps5_prof_ms(); g_ps5p[k] += _n - _ps5p; _ps5p = _n; } while (0)
++#else
++#define PS5P_T(k) ((void)0)
++#endif
++
+ static void sdl_present(GLuint src_fbo, int sw, int sh)
+ {
+     GLint vp[4], sbox[4], rfb = 0, dfb = 0;
+     GLboolean sc = glIsEnabled(GL_SCISSOR_TEST), cm[4];
+     int ww = 0, wh = 0, fw = sw, fh = sh, dw, dh;
+     if (sw <= 0 || sh <= 0) return;
++#if defined(JSRF_PS5)
++    double _ps5p = ps5_prof_ms();
++#endif
+     glGetIntegerv(GL_VIEWPORT, vp);
+     glGetIntegerv(GL_SCISSOR_BOX, sbox);
+     glGetBooleanv(GL_COLOR_WRITEMASK, cm);
+     glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &rfb);
+     glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &dfb);
+     SDL_GL_GetDrawableSize(g_window, &ww, &wh);
++    PS5P_T(PS5P_QUERY);
+     if (ww <= 0 || wh <= 0) return;
+     if (nv2a_wide_scene()) { fw = (int)(nv2a_wide_aspect() * 900.0f + 0.5f); fh = 900; }   /* 16:9 = 1600:900 */
+     dw = ww; dh = wh;
+@@ -1780,17 +1815,21 @@ static void sdl_present(GLuint src_fbo, int sw, int sh)
+     glViewport(0, 0, ww, wh);
+     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+     glClear(GL_COLOR_BUFFER_BIT);
++    PS5P_T(PS5P_CLEAR);
+     glBindFramebuffer(GL_READ_FRAMEBUFFER, src_fbo);
+     glBlitFramebuffer(0, 0, sw, sh,
+                       (ww - dw) / 2, (wh - dh) / 2, (ww - dw) / 2 + dw, (wh - dh) / 2 + dh,
+                       GL_COLOR_BUFFER_BIT, GL_LINEAR);
++    PS5P_T(PS5P_BLIT);
+     SDL_GL_SwapWindow(g_window);
++    PS5P_T(PS5P_SWAP);
+     glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)rfb);
+     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)dfb);
+     glViewport(vp[0], vp[1], vp[2], vp[3]);
+     glScissor(sbox[0], sbox[1], sbox[2], sbox[3]);
+     if (sc) glEnable(GL_SCISSOR_TEST);
+     glColorMask(cm[0], cm[1], cm[2], cm[3]);
++    PS5P_T(PS5P_RESTORE);
+     { static int said;
+       if (said < 3) {
+           said++;
+@@ -9618,11 +9657,17 @@ static void present(int is_frame)
+         }
+     }
+ 
++#if defined(JSRF_PS5)
++    double _ps5p = ps5_prof_ms();
++    if (is_frame) g_ps5p_frames++;
++#endif
+     if (is_frame) { PROF_T0(); cache_idle_frame(); frame_pace(); PROF_ADD(pace); }
++    if (is_frame) PS5P_T(PS5P_PACE);
+ 
+     /* Anti-aliasing turned on, off or changed since the last flip: between
+      * frames, before this one is shown. */
+     if (is_frame) { smaa_take(); msaa_take(); }
++    if (is_frame) PS5P_T(PS5P_AA);
+ 
+     /* Put the finished frame on screen: the surface the title has set up
+      * when it flips, which is what the window showed while surfaces were
+@@ -9667,13 +9712,24 @@ static void present(int is_frame)
+             if (g_presenter == 1) sdl_hand_over(nv2a_gfx_gl_fbo(prt), (int)pw, (int)ph);
+             else
+ #endif
++        {
++#if defined(JSRF_PS5)
++            GLuint _fbo = nv2a_gfx_gl_fbo(prt);
++            PS5P_T(PS5P_FBO);
++            sdl_present(_fbo, (int)pw, (int)ph);
++            _ps5p = ps5_prof_ms();
++#else
+             sdl_present(nv2a_gfx_gl_fbo(prt), (int)pw, (int)ph);
++#endif
++        }
+             sdl_pump();
++            PS5P_T(PS5P_PUMP);
+         }
+ #endif
+         /* The device's end of the frame: Metal shows it in the window's
+          * layer, and either way the frame's work is handed to the GPU. */
+         G->present(prt, pw, ph);
++        PS5P_T(PS5P_DEVICE);
+ #if defined(NV2A_GL_USE_CGL)
+         if (g_windowed && nv_window_should_close()) {
+             fprintf(stderr, "  [GL] window closed; stopping\n");
 diff --git a/src/platform/win32_compat.c b/src/platform/win32_compat.c
 index bb4f68d..53423e5 100644
 --- a/src/platform/win32_compat.c
