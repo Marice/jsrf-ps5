@@ -9,6 +9,7 @@
 #include <EGL/eglext.h>
 #include <GL/gl.h>
 #include <SDL2/SDL.h>
+#include <pthread.h>
 #include <stdio.h>
 
 static EGLDisplay g_display = EGL_NO_DISPLAY;
@@ -78,6 +79,24 @@ void jsrf_ps5_status_end(void)
 	g_status_context = EGL_NO_CONTEXT;
 }
 
+/* Tries one context on the current surface; logs each step (decision log D6). */
+static EGLContext try_context(const char *what, const EGLint *attributes)
+{
+	EGLContext c = eglCreateContext(g_display, g_config, EGL_NO_CONTEXT, attributes);
+	EGLint created = eglGetError();
+	EGLBoolean current = c != EGL_NO_CONTEXT && eglMakeCurrent(g_display, g_surface, g_surface, c);
+	EGLint made = eglGetError();
+	fprintf(stderr, "jsrf: egl: %s on thread %p: create %s (0x%x), make current %s (0x%x)\n", what,
+	        (void *)pthread_self(), c != EGL_NO_CONTEXT ? "ok" : "refused", created, current ? "ok" : "refused",
+	        made);
+	fflush(stderr);
+	if (c != EGL_NO_CONTEXT && !current) {
+		eglDestroyContext(g_display, c);
+		c = EGL_NO_CONTEXT;
+	}
+	return c;
+}
+
 static int gl_open(void)
 {
 	if (g_context != EGL_NO_CONTEXT)
@@ -85,19 +104,33 @@ static int gl_open(void)
 	jsrf_ps5_status_end();
 	if (egl_open() != 0)
 		return -1;
-	const EGLint context_attributes[] = {
+	static const EGLint core[] = {
 		EGL_CONTEXT_MAJOR_VERSION_KHR, 3, EGL_CONTEXT_MINOR_VERSION_KHR, 3,
 		EGL_CONTEXT_OPENGL_PROFILE_MASK_KHR, EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT_KHR, EGL_NONE,
 	};
-	g_context = eglCreateContext(g_display, g_config, EGL_NO_CONTEXT, context_attributes);
-	if (g_context == EGL_NO_CONTEXT || !eglMakeCurrent(g_display, g_surface, g_surface, g_context)) {
-		fprintf(stderr, "jsrf: egl: no 3.3 core context (0x%x)\n", eglGetError());
-		g_context = EGL_NO_CONTEXT;
+	static const EGLint compat[] = {
+		EGL_CONTEXT_OPENGL_PROFILE_MASK_KHR, EGL_CONTEXT_OPENGL_COMPATIBILITY_PROFILE_BIT_KHR, EGL_NONE,
+	};
+	g_context = try_context("3.3 core", core);
+	if (g_context == EGL_NO_CONTEXT) {
+		/* the surface made again, on this thread */
+		eglMakeCurrent(g_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+		eglDestroySurface(g_display, g_surface);
+		g_surface = eglCreateWindowSurface(g_display, g_config, 0, NULL);
+		fprintf(stderr, "jsrf: egl: the window surface made again: %s (0x%x)\n",
+		        g_surface != EGL_NO_SURFACE ? "ok" : "refused", eglGetError());
+		g_context = try_context("3.3 core, new surface", core);
+	}
+	if (g_context == EGL_NO_CONTEXT)
+		g_context = try_context("compatibility", compat); /* 4.6 compat also takes #version 330 core */
+	if (g_context == EGL_NO_CONTEXT) {
+		fprintf(stderr, "jsrf: egl: no context for the renderer\n");
 		return -1;
 	}
 	eglSwapInterval(g_display, 1);
 	fprintf(stderr, "jsrf: gl: %s on %s, %dx%d\n", (const char *)glGetString(GL_VERSION),
 	        (const char *)glGetString(GL_RENDERER), g_width, g_height);
+	fflush(stderr);
 	return 0;
 }
 
@@ -130,6 +163,11 @@ int __wrap_SDL_GL_MakeCurrent(SDL_Window *window, SDL_GLContext context)
 		return -1;
 	EGLBoolean ok = context ? eglMakeCurrent(g_display, g_surface, g_surface, g_context)
 	                        : eglMakeCurrent(g_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+	if (!ok) {
+		fprintf(stderr, "jsrf: egl: SDL_GL_MakeCurrent(%s) on thread %p refused (0x%x)\n",
+		        context ? "the context" : "none", (void *)pthread_self(), eglGetError());
+		fflush(stderr);
+	}
 	return ok ? 0 : -1;
 }
 
