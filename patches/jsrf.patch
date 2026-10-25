@@ -778,7 +778,7 @@ index 99d17e7..413a59b 100644
      return 0;
  }
 diff --git a/src/nv2a_gl/nv2a_gl.c b/src/nv2a_gl/nv2a_gl.c
-index 75b66db..0e503b5 100644
+index 75b66db..0b10a60 100644
 --- a/src/nv2a_gl/nv2a_gl.c
 +++ b/src/nv2a_gl/nv2a_gl.c
 @@ -1757,18 +1757,169 @@ static void sdl_menu_command(unsigned id)
@@ -984,7 +984,47 @@ index 75b66db..0e503b5 100644
      { static int said;
        if (said < 3) {
            said++;
-@@ -9618,11 +9780,17 @@ static void present(int is_frame)
+@@ -5061,6 +5223,10 @@ static void do_draw_body(void)
+      */
+     {
+         uint32_t inputs = g_pcache[slot].inputs;
++#if defined(JSRF_PS5)
++        uint32_t maxidx = 0;   /* this draw's highest index, for the check below */
++        { uint32_t k; for (k = 0; k < n; k++) if (S.idx[k] > maxidx) maxidx = S.idx[k]; }
++#endif
+         for (i = 0; i < NUM_ATTRS; i++) {
+             const Attr *a = &S.attr[i];
+             attr_at[i] = -1;
+@@ -5069,6 +5235,28 @@ static void do_draw_body(void)
+                 const_mask |= 1u << i;
+                 continue;
+             }
++#if defined(JSRF_PS5)
++            /* The same check the sticky fetch above makes, here too: an array
++             * whose last vertex lies outside guest memory is not read. One at
++             * 0x73FFxxxx read past the last RAM mirror and crashed the title
++             * at the intro's first frame (jsrf-ps5 decision log D23). */
++            if (!inl) {
++                uint32_t va = resolve(a->offset);
++                uint64_t end;
++                end = (uint64_t)va + (uint64_t)(maxidx + 1) * a->stride;
++                if (!((end <= 0x04000000u)
++                      || (va >= XBOX_CONTIG_BASE && end <= (uint64_t)XBOX_CONTIG_BASE + XBOX_CONTIG_SIZE)
++                      || (va >= 0xF0000000u && end <= 0xF4000000u))) {
++                    static unsigned said;
++                    if (said++ < 16)
++                        fprintf(stderr, "  [GL] attribute %u of a draw at 0x%08X (offset 0x%08X, stride %u, "
++                                "highest index %u) lies outside guest memory: not read\n",
++                                i, va, a->offset, a->stride, maxidx);
++                    const_mask |= 1u << i;
++                    continue;
++                }
++            }
++#endif
+             live[nlive].base = inl
+                 ? (const uint8_t *)S.inline_buf + a->offset
+                 : guest(resolve(a->offset));
+@@ -9618,11 +9806,17 @@ static void present(int is_frame)
          }
      }
  
@@ -1002,7 +1042,7 @@ index 75b66db..0e503b5 100644
  
      /* Put the finished frame on screen: the surface the title has set up
       * when it flips, which is what the window showed while surfaces were
-@@ -9667,13 +9835,24 @@ static void present(int is_frame)
+@@ -9667,13 +9861,24 @@ static void present(int is_frame)
              if (g_presenter == 1) sdl_hand_over(nv2a_gfx_gl_fbo(prt), (int)pw, (int)ph);
              else
  #endif
