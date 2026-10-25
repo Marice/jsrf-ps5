@@ -486,7 +486,7 @@ index 2381627..702c58a 100644
 +}
 +#endif
 diff --git a/src/kernel/nv2a_pb_scan.c b/src/kernel/nv2a_pb_scan.c
-index ff710cf..0177da1 100644
+index ff710cf..1f67ddc 100644
 --- a/src/kernel/nv2a_pb_scan.c
 +++ b/src/kernel/nv2a_pb_scan.c
 @@ -180,6 +180,26 @@ static uint32_t s_tot_calls, s_tot_returns;
@@ -531,6 +531,32 @@ index ff710cf..0177da1 100644
  
      while (va < end_va && words < 0x100000u) {
          uint32_t w = *(const uint32_t *)(mem + va);
+@@ -224,6 +252,25 @@ uint32_t nv2a_pb_scan(uint32_t start_va, uint32_t end_va)
+              * target, not here. */
+             jumps++;
+             jump_to = ((w & 3u) == 1u) ? (w & ~3u) : (w & 0x1FFFFFFCu);
++#if defined(JSRF_PS5)
++            /* A jump to where no pushbuffer can be: the walk is out of step
++             * with the commands. Where, and what came before (decision log
++             * D26). */
++            if ((jump_to & 0x0FFFFFFFu) >= (PS5_PB_HI - PS5_PB_LO)) {
++                static unsigned said;
++                if (said++ < 8) {
++                    int k;
++                    fprintf(stderr, "[PBDESYNC] walk %08X..%08X: word %08X at %08X read as a jump; the 24 words before:\n[PBDESYNC] ",
++                            start_va, end_va, w, va - 4);
++                    for (k = 24; k >= 1; k--) {
++                        uint32_t at = va - 4 - 4u * (uint32_t)k;
++                        if (at < start_va) continue;
++                        fprintf(stderr, " %08X", *(const uint32_t *)(mem + at));
++                    }
++                    fprintf(stderr, "\n");
++                }
++            }
++#endif
+             break;
+         }
+         if ((w & 3u) == 2u) {
 diff --git a/src/kernel/xbox_memory_layout.c b/src/kernel/xbox_memory_layout.c
 index 99d17e7..e932c74 100644
 --- a/src/kernel/xbox_memory_layout.c
