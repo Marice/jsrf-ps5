@@ -443,7 +443,7 @@ index 2381627..702c58a 100644
 +}
 +#endif
 diff --git a/src/kernel/xbox_memory_layout.c b/src/kernel/xbox_memory_layout.c
-index 99d17e7..0d0af9f 100644
+index 99d17e7..a5f9321 100644
 --- a/src/kernel/xbox_memory_layout.c
 +++ b/src/kernel/xbox_memory_layout.c
 @@ -214,6 +214,27 @@ static void nv2a_kick_signal(void)
@@ -482,7 +482,7 @@ index 99d17e7..0d0af9f 100644
  void xbox_nv2a_kick(void)
  {
      if (s_kick_on < 0) { const char *e = getenv("RECOMP_NV2A_KICK"); s_kick_on = e ? atoi(e) : 1; }
-@@ -718,10 +740,74 @@ void xbox_nv2a_vblank_service(void)
+@@ -718,10 +740,70 @@ void xbox_nv2a_vblank_service(void)
      if (g_nv2a_memory) vblank_intr_tick((volatile uint32_t *)g_nv2a_memory);
  }
  
@@ -492,10 +492,8 @@ index 99d17e7..0d0af9f 100644
 + * run while a guest thread spun: D3D's interrupt routine waited ~60 ms on the
 + * vblank's bits (D10), then KickOff (sub_001912A0) on the PFB flush bit, with
 + * the guest lock held and the game at 7.5 frames a second. The same writes the
-+ * thread makes, so running them from both is what upstream's frame_pace
-+ * already does for the vblank. */
-+static void fence_mirrors_tick(void);
-+static void counter_mirrors_tick(void);
++ * thread makes for its handshake bits, so running them from both is what
++ * upstream's frame_pace already does for the vblank. */
 +void xbox_nv2a_ack_pass(void)
 +{
 +    volatile uint32_t *regs = (volatile uint32_t *)g_nv2a_memory;
@@ -514,14 +512,12 @@ index 99d17e7..0d0af9f 100644
 +        if ((*r & NV2A_IDLE[i].idle_mask) != NV2A_IDLE[i].idle_mask)
 +            *r |= NV2A_IDLE[i].idle_mask;
 +    }
-+    {
-+        volatile uint32_t *put = (volatile uint32_t *)((char *)regs + NV2A_USER_DMA_PUT);
-+        volatile uint32_t *get = (volatile uint32_t *)((char *)regs + NV2A_USER_DMA_GET);
-+        if (*get != *put)
-+            *get = *put;
-+    }
-+    fence_mirrors_tick();
-+    counter_mirrors_tick();
++    /* Not GET = PUT, nor the fence and counter mirrors: those say the GPU has
++     * read the pushbuffer up to there, and only the ack thread, which walks
++     * it, may say so. Done from a spinning guest thread they told D3D that
++     * commands the walk had not reached were consumed; D3D wrote over them,
++     * the walk read garbage (pushbuffer calls to 0x890310E0) and the title
++     * crashed at guest 0x85555594 (decision log D17). */
 +}
 +#endif
 +
@@ -557,7 +553,7 @@ index 99d17e7..0d0af9f 100644
          vblank_intr_tick(regs);
          for (size_t i = 0; i < sizeof(NV2A_ACK) / sizeof(NV2A_ACK[0]); i++) {
              volatile uint32_t *r =
-@@ -755,6 +841,9 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -755,6 +837,9 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
          counter_mirrors_tick();
          frame_counters_tick();
          framebuffer_probe_tick();
@@ -567,7 +563,7 @@ index 99d17e7..0d0af9f 100644
  
          /* Which framebuffer the display would be scanning out.
           *
-@@ -878,6 +967,9 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -878,6 +963,9 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
          *(volatile uint32_t *)((uintptr_t)(XBOX_KERNEL_DATA_BASE + KDATA_TICK_COUNT)
                                 + g_memory_offset) = GetTickCount();
  
@@ -577,7 +573,7 @@ index 99d17e7..0d0af9f 100644
          /* Yield -- or actually sleep, on a host with fewer cores than the
           * runtime has busy threads. RECOMP_ACK_SLEEP_US=<n> (default 200 on
           * POSIX) keeps this thread from eating a whole core; the pushbuffer
-@@ -905,6 +997,9 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -905,6 +993,9 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
              else Sleep(0);
  #endif
          }
