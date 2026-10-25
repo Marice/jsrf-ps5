@@ -55,11 +55,16 @@ __attribute__((constructor(102))) static void ps5_env(void)
 
 /* ---- the status screen, until the game's renderer starts ---- */
 
+static void status3(const char *line1, const char *line2, const char *line3, int failed)
+{
+	const char *lines[3] = {line1, line2 ? line2 : "", line3 ? line3 : ""};
+	const int pass[3] = {!failed, !failed, !failed};
+	jsrf_ps5_screen_lines("JET SET RADIO FUTURE", lines, pass, line3 ? 3 : 2);
+}
+
 static void status(const char *line1, const char *line2, int failed)
 {
-	const char *lines[2] = {line1, line2 ? line2 : ""};
-	const int pass[2] = {!failed, !failed};
-	jsrf_ps5_screen_lines("JET SET RADIO FUTURE", lines, pass, 2);
+	status3(line1, line2, NULL, failed);
 }
 
 /* Stays on a message the player has to act on, until the title is closed (the PS button). */
@@ -115,9 +120,12 @@ static int on_progress(void *ctx, uint64_t done, uint64_t total)
 		char line[64];
 		snprintf(line, sizeof line, "%d%% (%llu OF %llu MB)", percent, (unsigned long long)(done >> 20),
 		         (unsigned long long)(total >> 20));
-		status("UNPACKING YOUR DISC IMAGE, ONCE", line, 0);
-		if (percent % 10 == 0)
+		/* about 3,200 files, 2.5 GB: about ten minutes on the console's own storage */
+		status3("UNPACKING YOUR DISC IMAGE, ONCE", line, "GRAB SOME SNACKS, THIS TAKES ABOUT 10 MINUTES...", 0);
+		if (percent % 10 == 0) {
 			fprintf(stderr, "jsrf: unpacking %s\n", line);
+			fflush(stderr); /* the log is buffered: the progress is in it as it happens */
+		}
 	}
 	return 0;
 }
@@ -129,6 +137,7 @@ static int import_disc(void)
 	if (find_iso(iso, sizeof iso) != 0)
 		return stay_with("NO DISC IMAGE FOUND", "PUT YOUR JSRF (USA) .ISO IN THE TITLE FOLDER'S DUMP FOLDER");
 	fprintf(stderr, "jsrf: disc image %s\n", iso);
+	fflush(stderr);
 	status("CHECKING YOUR DISC IMAGE", NULL, 0);
 	int r = jsrf_xbe_check_iso(iso, why, sizeof why);
 	if (r != JSRF_XBE_OK) {
