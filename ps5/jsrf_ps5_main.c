@@ -29,7 +29,8 @@
 #define SETTINGS_FILE TITLE_DIR "/settings"
 #define ISO_NAME "JSRF - Jet Set Radio Future (USA).iso"
 
-int jsrf_ps5_status_begin(void);                                                          /* jsrf_ps5_gl.c */
+int jsrf_ps5_status_begin(void); /* jsrf_ps5_gl.c */
+void jsrf_ps5_status_end(void);
 void jsrf_ps5_screen_lines(const char *title, const char *const *lines, const int *pass, int count); /* screen */
 
 /* The desktop and Android launchers' settings (port/android/jsrf_android.c k_env), without Android's own SDL ones;
@@ -202,6 +203,9 @@ int nv_ps5_main(int argc, char **argv, int (*host)(void))
 	}
 	status("STARTING", NULL, 0);
 	log_flexible("before the engine");
+	/* The status screen's context lets go of the surface on this thread: the renderer makes its own current on its
+	   thread, and EGL refused that while this one was still current here (0x3009, decision log D5). */
+	jsrf_ps5_status_end();
 	mkdir(SAVE_DIR, 0755);
 	chdir(GAME_DIR);
 

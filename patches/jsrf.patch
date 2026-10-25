@@ -81,7 +81,7 @@ index 2b3b3f4..e91438d 100644
      # needed (and on an iPhone or an Android phone not there).
      target_link_libraries(xbox_kernel PUBLIC platform xbox_nv2a_gl)
 diff --git a/src/platform/win32_compat.c b/src/platform/win32_compat.c
-index bb4f68d..4c8535c 100644
+index bb4f68d..53423e5 100644
 --- a/src/platform/win32_compat.c
 +++ b/src/platform/win32_compat.c
 @@ -36,6 +36,18 @@
@@ -103,7 +103,17 @@ index bb4f68d..4c8535c 100644
  #else
  #include <sys/sysinfo.h>
  #if defined(__ANDROID__)
-@@ -1450,9 +1462,15 @@ void *win32_reserve_address_space(void *base, size_t size)
+@@ -268,6 +280,9 @@ typedef struct w32_object {
+     int             fd;
+     SIZE_T          map_size;
+     char           *file_path;
++#if defined(JSRF_PS5)
++    int64_t         ps5_physical;   /* a page-file mapping's direct memory (fd -1) */
++#endif
+ } w32_object;
+ 
+ /* pseudo handles for "current thread"/"current process" */
+@@ -1450,9 +1465,15 @@ void *win32_reserve_address_space(void *base, size_t size)
  {
      void *p;
      if (g_reserved_n >= W32_MAX_RESERVATIONS) return NULL;
@@ -119,7 +129,7 @@ index bb4f68d..4c8535c 100644
      if (base && p != base) { munmap(p, size); return NULL; }
      g_reserved[g_reserved_n].base = p;
      g_reserved[g_reserved_n].size = size;
-@@ -1517,11 +1535,137 @@ static int protect_within_host_pages(void *addr, size_t size, int prot)
+@@ -1517,11 +1538,137 @@ static int protect_within_host_pages(void *addr, size_t size, int prot)
      return mprotect((void *)lo, (size_t)(hi - lo), prot);
  }
  
@@ -257,7 +267,7 @@ index bb4f68d..4c8535c 100644
      /* MEM_COMMIT on a region already reserved by a prior VirtualAlloc:
       * just adjust protection. */
      if ((allocationType & MEM_COMMIT) && !(allocationType & MEM_RESERVE) && address) {
-@@ -1537,6 +1681,16 @@ LPVOID VirtualAlloc(LPVOID address, SIZE_T size, DWORD allocationType, DWORD pro
+@@ -1537,6 +1684,16 @@ LPVOID VirtualAlloc(LPVOID address, SIZE_T size, DWORD allocationType, DWORD pro
  #endif
      void *p = mmap(address, size, prot ? prot : PROT_READ | PROT_WRITE,
                     flags, -1, 0);
@@ -274,7 +284,7 @@ index bb4f68d..4c8535c 100644
      if (p == MAP_FAILED) { SetLastError(8); return NULL; }
  #if !defined(MAP_FIXED_NOREPLACE)
      if (owned) return p;
-@@ -1559,6 +1713,9 @@ LPVOID VirtualAlloc(LPVOID address, SIZE_T size, DWORD allocationType, DWORD pro
+@@ -1559,6 +1716,9 @@ LPVOID VirtualAlloc(LPVOID address, SIZE_T size, DWORD allocationType, DWORD pro
  BOOL VirtualFree(LPVOID address, SIZE_T size, DWORD freeType)
  {
      if (freeType & MEM_RELEASE) {
@@ -284,7 +294,7 @@ index bb4f68d..4c8535c 100644
          /* Win32 MEM_RELEASE passes size 0; we can't know the length, so this
           * path is only safe when callers pass the real size. */
          if (size == 0) return TRUE;
-@@ -1685,7 +1842,7 @@ VOID DebugBreak(void) {
+@@ -1685,7 +1845,7 @@ VOID DebugBreak(void) {
  
  VOID SecureZeroMemory(PVOID ptr, SIZE_T cnt)
  {
@@ -293,7 +303,7 @@ index bb4f68d..4c8535c 100644
      /* Darwin's memset_s is only declared when __STDC_WANT_LIB_EXT1__ is set
       * before every string.h in the translation unit, which is not something a
       * compat header can promise; Android's bionic has no explicit_bzero (and
-@@ -1996,6 +2153,11 @@ static int anon_map_fd(const char *name)
+@@ -1996,6 +2156,11 @@ static int anon_map_fd(const char *name)
              return fd;
          }
      }
@@ -305,8 +315,61 @@ index bb4f68d..4c8535c 100644
  #else
      return memfd_create(name ? name : "xbox_map", 0);
  #endif
-@@ -2055,6 +2217,13 @@ LPVOID MapViewOfFileEx(HANDLE mapping, DWORD access, DWORD offHigh, DWORD offLow
+@@ -2008,6 +2173,29 @@ HANDLE CreateFileMappingA(HANDLE file, LPSECURITY_ATTRIBUTES sa, DWORD protect,
+     SIZE_T size = ((SIZE_T)maxSizeHigh << 32) | maxSizeLow;
+     if (size == 0) { SetLastError(ERROR_INVALID_PARAMETER); return NULL; }
+ 
++#if defined(JSRF_PS5)
++    /* The guest RAM and its mirrors: every MAP_SHARED view of a shm object
++     * costs its full size again in flexible memory on the PS5 (64 MB per
++     * mirror; the fifth ran out, jsrf-ps5 decision log D5). Direct memory
++     * can be mapped at several addresses for nothing more (phase 0 check
++     * 2c): the mapping is a range of it, and each view maps that range. */
++    {
++        int64_t physical = 0;
++        size_t length = (size + PS5_DIRECT_ALIGN - 1) & ~(PS5_DIRECT_ALIGN - 1);
++        if (sceKernelAllocateDirectMemory(0, sceKernelGetDirectMemorySize(), length, 2u << 20, 12,
++                                          &physical) == 0) {
++            w32_object *o = obj_alloc(K_FILEMAP);
++            o->fd = -1;
++            o->map_size = size;
++            o->ps5_physical = physical;
++            fprintf(stderr, "  [VM] file mapping %zu KiB in direct memory at 0x%llx\n", (size_t)size / 1024,
++                    (unsigned long long)physical);
++            return (HANDLE)o;
++        }
++        fprintf(stderr, "  [VM] file mapping %zu KiB: no direct memory, a shm object instead\n",
++                (size_t)size / 1024);
++    }
++#endif
+     int fd = anon_map_fd(name);
+     if (fd < 0) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); return NULL; }
+     if (ftruncate(fd, (off_t)size) != 0) {
+@@ -2053,8 +2241,36 @@ LPVOID MapViewOfFileEx(HANDLE mapping, DWORD access, DWORD offHigh, DWORD offLow
+      * A hint plus a check gives what the callers actually mean: the kernel
+      * honours it when the range is free, and anything else is a refusal. */
      int owned = inside_reservation(baseAddr, len);
++#if defined(JSRF_PS5)
++    if (o->fd < 0) {
++        /* direct memory: at the address inside the span, or where the kernel puts it */
++        void *at = owned ? baseAddr : NULL;
++        int32_t r = (off & (PS5_DIRECT_ALIGN - 1)) ? -1
++                  : sceKernelMapDirectMemory(&at, len, prot, owned ? 0x10 : 0, o->ps5_physical + off, 0);
++        if (len >= (1u << 20)) {
++            fprintf(stderr, "  [VM] view %zu KiB at %p: direct memory %s (flexible %zu MiB free)\n",
++                    (size_t)len / 1024, baseAddr, r == 0 ? "mapped" : "refused", ps5_flexible_free() >> 20);
++            fflush(stderr);
++        }
++        if (r != 0 || !at) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); return NULL; }
++        if (!owned && baseAddr && at != baseAddr) {
++            munmap(at, len);
++            SetLastError(ERROR_INVALID_ADDRESS);
++            return NULL;
++        }
++        view_register(at, len);
++        return at;
++    }
++#endif
      void *p = mmap(baseAddr, len, prot,
                     MAP_SHARED | (owned ? MAP_FIXED : 0), o->fd, off);
 +#if defined(JSRF_PS5)
@@ -319,7 +382,23 @@ index bb4f68d..4c8535c 100644
      if (p == MAP_FAILED) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); return NULL; }
      if (!owned && baseAddr && p != baseAddr) {
          munmap(p, len);
-@@ -2126,6 +2295,18 @@ BOOL GlobalMemoryStatusEx(LPMEMORYSTATUSEX b)
+@@ -2074,6 +2290,15 @@ BOOL UnmapViewOfFile(LPCVOID baseAddr)
+ {
+     size_t len = view_take(baseAddr);
+     if (len == 0) return FALSE;
++#if defined(JSRF_PS5)
++    if (inside_reservation(baseAddr, len)) {
++        /* back to a reservation, so the guest span stays the title's */
++        void *again = (void *)baseAddr;
++        int ok = munmap((void *)baseAddr, len) == 0;
++        sceKernelReserveVirtualRange(&again, len, 0x10, PS5_DIRECT_ALIGN);
++        return ok;
++    }
++#endif
+     return munmap((void *)baseAddr, len) == 0;
+ }
+ 
+@@ -2126,6 +2351,18 @@ BOOL GlobalMemoryStatusEx(LPMEMORYSTATUSEX b)
          b->ullTotalPageFile = b->ullTotalPhys;
          b->ullAvailPageFile = b->ullAvailPhys;
      }
