@@ -337,6 +337,18 @@ int nv_ps5_main(int argc, char **argv, int (*host)(void))
 		fprintf(stderr, "jsrf: game/: %s\n", why);
 		return stay_with("THE GAME FOLDER IS NOT THE USA RELEASE", "REMOVE GAME/ AND PUT THE RIGHT .ISO IN DUMP/");
 	}
+	/* The PS5's defaults, on the first start (decision log D30): widescreen 16:9 (upstream's wider view, not a stretch)
+	   and the picture made at 3x the Xbox's (1920x1440, wider in 16:9), scaled down to the 1080p output. The keys are
+	   upstream's (nv2a_gl.c sdl_cfg_get); F9/F10 set them on a PC, which a DualSense does not have. A file that is there
+	   is left as it is. */
+	if (!exists(SETTINGS_FILE)) {
+		FILE *f = fopen(SETTINGS_FILE, "w");
+		if (f) {
+			fputs("scale=3\nwidescreen=1\n", f);
+			fclose(f);
+			fprintf(stderr, "jsrf: settings written: scale 3, widescreen\n");
+		}
+	}
 	status("STARTING", NULL, 0);
 	log_flexible("before the engine");
 	measure_waits();
