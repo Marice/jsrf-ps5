@@ -96,14 +96,16 @@ index 2b3b3f4..e91438d 100644
      # needed (and on an iPhone or an Android phone not there).
      target_link_libraries(xbox_kernel PUBLIC platform xbox_nv2a_gl)
 diff --git a/src/kernel/kernel_bridge.c b/src/kernel/kernel_bridge.c
-index 331d6fe..2e0b256 100644
+index 331d6fe..0843631 100644
 --- a/src/kernel/kernel_bridge.c
 +++ b/src/kernel/kernel_bridge.c
-@@ -2919,6 +2919,15 @@ static XboxTimer g_timers[XBOX_MAX_TIMERS];
+@@ -2919,6 +2919,17 @@ static XboxTimer g_timers[XBOX_MAX_TIMERS];
  static CRITICAL_SECTION g_timer_lock;
  static int g_timer_started;
  
 +#if defined(JSRF_PS5)
++void ps5_lock_sample(void);
++void ps5_lock_sample_report(void);
 +static double ps5_ms(void)
 +{
 +    LARGE_INTEGER c, f;
@@ -115,7 +117,7 @@ index 331d6fe..2e0b256 100644
  static DWORD WINAPI kernel_timer_thread(LPVOID unused)
  {
      int slot = xbox_worker_stack_alloc();
-@@ -2946,11 +2955,38 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
+@@ -2946,11 +2957,40 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
          g_fs_base = tib;
      }
  
@@ -142,11 +144,13 @@ index 331d6fe..2e0b256 100644
 +                    ps5_t[0] / ps5_rounds, ps5_t[1] / ps5_rounds, ps5_t[2] / ps5_rounds, ps5_t[3] / ps5_rounds,
 +                    ps5_t[4] / ps5_rounds, ps5_t[5] / ps5_rounds, ps5_t[6] / ps5_rounds, ps5_t[7] / ps5_rounds,
 +                    ps5_t[8] / ps5_rounds);
++            ps5_lock_sample_report();
 +            memset(ps5_t, 0, sizeof ps5_t);
 +            ps5_rounds = 0;
 +            ps5_since = ps5_last;
 +        }
 +        ps5_rounds++;
++        ps5_lock_sample();
 +#endif
  
          Sleep(1);
@@ -154,7 +158,7 @@ index 331d6fe..2e0b256 100644
          /*
           * RECOMP_TABLE_WATCH=<addr>,<bytes>,<stride>: catch a pointer table
           * going bad at the moment it goes bad.
-@@ -3018,12 +3054,19 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
+@@ -3018,12 +3058,19 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
                  prev_valid = 1;
              }
          }
@@ -174,7 +178,7 @@ index 331d6fe..2e0b256 100644
          now = (long long)GetTickCount64();
  
          for (i = 0; i < XBOX_MAX_TIMERS; i++) {
-@@ -3047,6 +3090,7 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
+@@ -3047,6 +3094,7 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
              if (dpc)
                  kernel_run_dpc(dpc, 0, 0);
          }
@@ -182,7 +186,7 @@ index 331d6fe..2e0b256 100644
      }
  }
  
-@@ -6169,6 +6213,32 @@ static RECOMP_TLS int g_kernel_dispatch_slot = -1;
+@@ -6169,6 +6217,32 @@ static RECOMP_TLS int g_kernel_dispatch_slot = -1;
   *
   * RECOMP_GUEST_LOCK=0 disables it. */
  static CRITICAL_SECTION g_guest_lock;
@@ -215,7 +219,41 @@ index 331d6fe..2e0b256 100644
  static volatile unsigned long g_lock_owner;   /* see xbox_guest_lock_report */
  #ifdef __APPLE__
  #include <pthread.h>
-@@ -6384,7 +6454,11 @@ void xbox_guest_lock_acquire(void)
+@@ -6258,6 +6332,33 @@ int32_t g_xbox_guest_cpu_preempt;
+ /* The holder's latest loop back edge and its IRQL there, for the [LOCK]
+  * report. */
+ static volatile uint32_t g_lock_owner_edge;
++#if defined(JSRF_PS5)
++/* Where the guest lock's holder is, sampled each round of the timer thread
++ * (jsrf-ps5 decision log D10): its thread and its latest loop back edge. */
++static struct { unsigned long tid; uint32_t edge; unsigned n; } s_ps5_where[16];
++void ps5_lock_sample(void)
++{
++    unsigned long tid = g_lock_owner;
++    uint32_t edge = g_lock_owner_edge;
++    int i, free_slot = -1;
++    if (!tid) return;
++    for (i = 0; i < 16; i++) {
++        if (s_ps5_where[i].n && s_ps5_where[i].tid == tid && s_ps5_where[i].edge == edge) { s_ps5_where[i].n++; return; }
++        if (!s_ps5_where[i].n && free_slot < 0) free_slot = i;
++    }
++    if (free_slot >= 0) { s_ps5_where[free_slot].tid = tid; s_ps5_where[free_slot].edge = edge; s_ps5_where[free_slot].n = 1; }
++}
++void ps5_lock_sample_report(void)
++{
++    int i;
++    fprintf(stderr, "  [WHERE] the lock's holder, by samples:");
++    for (i = 0; i < 16; i++)
++        if (s_ps5_where[i].n)
++            fprintf(stderr, " tid %lu at %08X x%u;", s_ps5_where[i].tid, (unsigned)s_ps5_where[i].edge, s_ps5_where[i].n);
++    fprintf(stderr, "\n");
++    memset(s_ps5_where, 0, sizeof s_ps5_where);
++}
++#endif
+ static volatile unsigned g_lock_owner_irql;
+ /* Interrupts delivered from inside a spin rather than on the timer thread. */
+ static unsigned long g_spin_isrs;
+@@ -6384,7 +6485,11 @@ void xbox_guest_lock_acquire(void)
        int watch = lock_watch();
        if (watch) t0 = (long long)GetTickCount64();
        __atomic_add_fetch(&g_xbox_guest_cpu_preempt, 1, __ATOMIC_RELAXED);
@@ -227,7 +265,7 @@ index 331d6fe..2e0b256 100644
        __atomic_sub_fetch(&g_xbox_guest_cpu_preempt, 1, __ATOMIC_RELAXED);
        __atomic_add_fetch(&g_lock_acquires, 1, __ATOMIC_RELEASE);
        if (watch) {
-@@ -6511,7 +6585,11 @@ void xbox_guest_lock_release(void)
+@@ -6511,7 +6616,11 @@ void xbox_guest_lock_release(void)
              (long long)GetTickCount64() - t_guest_since;
      t_guest_holds = 0;
      g_lock_owner = 0;
@@ -239,6 +277,26 @@ index 331d6fe..2e0b256 100644
  }
  /* Stand back for a moment inside a guest spin that has no calls in it.
   *
+@@ -6892,6 +7001,19 @@ void xbox_GuestCpuPreempt(uint32_t va)
+     extern unsigned g_recomp_tick;
+     extern unsigned char xbox_KeCurrentIrql(void);
+     extern int mcpx_apu_irq_pending_global(void) __attribute__((weak));
++#if defined(JSRF_PS5)
++    /* A holder inside an interrupt or DPC cannot hand over; D3D's NV2A
++     * interrupt routine spins there until the emulated GPU clears PMC_INTR_0,
++     * which on the PS5 its ack thread did only every ~60 ms while the spinner
++     * held the lock and everyone queued behind it (jsrf-ps5 decision log D10).
++     * The spinner clears it itself, as frame_pace does between its sleeps. */
++    if (t_guest_holds && t_in_callback) {
++        extern void xbox_nv2a_vblank_service(void);
++        g_lock_owner_edge = va;
++        if ((++g_recomp_tick & 0x3Fu) == 0u) xbox_nv2a_vblank_service();
++        return;
++    }
++#endif
+     if (!t_guest_holds || t_in_callback) return;
+     g_lock_owner_edge = va;
+     if ((++g_recomp_tick & 0xFFu) != 0u) return;
 diff --git a/src/kernel/xbox_memory_layout.c b/src/kernel/xbox_memory_layout.c
 index 99d17e7..7b4d4da 100644
 --- a/src/kernel/xbox_memory_layout.c
