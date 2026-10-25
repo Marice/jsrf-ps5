@@ -47,6 +47,7 @@ static const char *const k_env[][2] = {
 	{"RECOMP_GL_CURTAIN", "skip"}, {"RECOMP_MUTE", "0"}, {"RECOMP_WINDOW", "1"},
 	{"RECOMP_FULLSCREEN", "1"}, {"RECOMP_WINDOW_W", "1920"}, {"RECOMP_WINDOW_H", "1080"},
 	{"SDL_VIDEODRIVER", "offscreen"},
+	{"RECOMP_GL_PROFILE", "1"}, /* this measurement only: where a draw's time goes in the title menu (decision log D29) */
 	{"RECOMP_APU_STATS", "1"}, /* dev builds: the sound ring once a second (decision log D28) */
 
 
