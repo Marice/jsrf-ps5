@@ -532,7 +532,7 @@ index ff710cf..0177da1 100644
      while (va < end_va && words < 0x100000u) {
          uint32_t w = *(const uint32_t *)(mem + va);
 diff --git a/src/kernel/xbox_memory_layout.c b/src/kernel/xbox_memory_layout.c
-index 99d17e7..413a59b 100644
+index 99d17e7..e80b72d 100644
 --- a/src/kernel/xbox_memory_layout.c
 +++ b/src/kernel/xbox_memory_layout.c
 @@ -214,6 +214,27 @@ static void nv2a_kick_signal(void)
@@ -727,11 +727,26 @@ index 99d17e7..413a59b 100644
                      } else if (last_put && put < last_put) {
                          /* The ring wrapped: PUT went back to its start.
                           * The tail from the old PUT to the jump used to be
-@@ -806,9 +955,23 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -805,10 +954,37 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+                          * then from the jump's target to the new PUT. */
                          uint32_t from = XBOX_CONTIG_BASE | (last_put & 0x0FFFFFFFu);
                          uint32_t to   = XBOX_CONTIG_BASE | (put      & 0x0FFFFFFFu);
-                         uint32_t j = nv2a_pb_scan(from, from + 0x20000u);
-+                        PS5_WALKED(from, from + 0x20000u, j, 'T');
+-                        uint32_t j = nv2a_pb_scan(from, from + 0x20000u);
++#if defined(JSRF_PS5)
++                        /* The tail up to its jump, however long: a make-space
++                         * for 32 KB or more leaves more than 128 KB between the
++                         * old PUT and the jump, upstream's limit here; the jump
++                         * was not found, everything after it (D3D's NOP(5)
++                         * among it) went unwalked, and D3D wrote over commands
++                         * the walk never read (decision log D24). The walk
++                         * stops at the jump; nv2a_pb_scan keeps it inside the
++                         * contiguous memory (D21). */
++                        uint32_t tail_ = 0x400000u;
++#else
++                        uint32_t tail_ = 0x20000u;
++#endif
++                        uint32_t j = nv2a_pb_scan(from, from + tail_);
++                        PS5_WALKED(from, from + tail_, j, 'T');
 +#if defined(JSRF_PS5)
 +                        /* No jump in the tail: the part from the ring's start
 +                         * to the new PUT was never walked, and the NOP(5) D3D's
@@ -752,7 +767,7 @@ index 99d17e7..413a59b 100644
                          }
                      }
                      /* Periodic, because what the title submits at init is not
-@@ -878,6 +1041,14 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -878,6 +1054,14 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
          *(volatile uint32_t *)((uintptr_t)(XBOX_KERNEL_DATA_BASE + KDATA_TICK_COUNT)
                                 + g_memory_offset) = GetTickCount();
  
@@ -767,7 +782,7 @@ index 99d17e7..413a59b 100644
          /* Yield -- or actually sleep, on a host with fewer cores than the
           * runtime has busy threads. RECOMP_ACK_SLEEP_US=<n> (default 200 on
           * POSIX) keeps this thread from eating a whole core; the pushbuffer
-@@ -905,6 +1076,9 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -905,6 +1089,9 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
              else Sleep(0);
  #endif
          }
