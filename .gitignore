@@ -1,0 +1,9 @@
+docs/decision-log.md
+build*/
+dist/
+.deps/
+dump/
+game_files/
+src-upstream/
+pkg/
+*:Zone.Identifier
