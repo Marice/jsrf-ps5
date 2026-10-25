@@ -532,7 +532,7 @@ index ff710cf..0177da1 100644
      while (va < end_va && words < 0x100000u) {
          uint32_t w = *(const uint32_t *)(mem + va);
 diff --git a/src/kernel/xbox_memory_layout.c b/src/kernel/xbox_memory_layout.c
-index 99d17e7..e80b72d 100644
+index 99d17e7..e932c74 100644
 --- a/src/kernel/xbox_memory_layout.c
 +++ b/src/kernel/xbox_memory_layout.c
 @@ -214,6 +214,27 @@ static void nv2a_kick_signal(void)
@@ -698,7 +698,20 @@ index 99d17e7..e80b72d 100644
          vblank_intr_tick(regs);
          for (size_t i = 0; i < sizeof(NV2A_ACK) / sizeof(NV2A_ACK[0]); i++) {
              volatile uint32_t *r =
-@@ -755,6 +893,9 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -747,14 +885,22 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+                 (volatile uint32_t *)((char *)regs + NV2A_USER_DMA_PUT);
+             volatile uint32_t *get =
+                 (volatile uint32_t *)((char *)regs + NV2A_USER_DMA_GET);
++#if defined(JSRF_PS5)
++            /* On the PS5 GET follows the walk (below), not PUT: decision log D25. */
++            (void)put; (void)get;
++#else
+             if (*get != *put) {
+                 *get = *put;
+             }
++#endif
+         }
+         fence_mirrors_tick();
          counter_mirrors_tick();
          frame_counters_tick();
          framebuffer_probe_tick();
@@ -708,7 +721,7 @@ index 99d17e7..e80b72d 100644
  
          /* Which framebuffer the display would be scanning out.
           *
-@@ -793,9 +934,17 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -793,9 +939,17 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
                       * The contiguous window IS the physical-address view, so
                       * OR-ing its base is the documented round trip, not a
                       * guess. */
@@ -727,7 +740,7 @@ index 99d17e7..e80b72d 100644
                      } else if (last_put && put < last_put) {
                          /* The ring wrapped: PUT went back to its start.
                           * The tail from the old PUT to the jump used to be
-@@ -805,10 +954,37 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -805,10 +959,37 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
                           * then from the jump's target to the new PUT. */
                          uint32_t from = XBOX_CONTIG_BASE | (last_put & 0x0FFFFFFFu);
                          uint32_t to   = XBOX_CONTIG_BASE | (put      & 0x0FFFFFFFu);
@@ -767,7 +780,26 @@ index 99d17e7..e80b72d 100644
                          }
                      }
                      /* Periodic, because what the title submits at init is not
-@@ -878,6 +1054,14 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -821,6 +1002,18 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+                     }
+                 }
+                 last_put = put; last_put_ms = now_ms;
++#if defined(JSRF_PS5)
++                /* GET is how far the GPU has read: D3D writes only where GET
++                 * has passed. Upstream set it to PUT at the top of each round,
++                 * before this walk; on a PC the walk follows within ~200 us,
++                 * but here a round's walk can take 12 ms and more (it
++                 * presents), and D3D, seeing everything read, lapped the ring
++                 * and wrote over commands the walk had yet to read: garbage
++                 * calls, wraps without a jump, a lost NOP(5), artefacts and
++                 * page faults (decision log D25). So GET is moved only to what
++                 * has been walked. */
++                *(volatile uint32_t *)((char *)regs + NV2A_USER_DMA_GET) = put;
++#endif
+                 /* GET as well as PUT. A title that stops submitting has either
+                  * finished or is spinning on the GPU catching up, and only GET
+                  * tells those apart -- D3D waits for GET to reach PUT before it
+@@ -878,6 +1071,14 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
          *(volatile uint32_t *)((uintptr_t)(XBOX_KERNEL_DATA_BASE + KDATA_TICK_COUNT)
                                 + g_memory_offset) = GetTickCount();
  
@@ -782,7 +814,7 @@ index 99d17e7..e80b72d 100644
          /* Yield -- or actually sleep, on a host with fewer cores than the
           * runtime has busy threads. RECOMP_ACK_SLEEP_US=<n> (default 200 on
           * POSIX) keeps this thread from eating a whole core; the pushbuffer
-@@ -905,6 +1089,9 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -905,6 +1106,9 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
              else Sleep(0);
  #endif
          }
