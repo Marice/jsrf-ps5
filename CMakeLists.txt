@@ -26,5 +26,7 @@ set(PS5_GL_WRAPS
   -Wl,--wrap=SDL_GL_SetAttribute -Wl,--wrap=SDL_GL_SetSwapInterval)
 target_link_options(jsrf_recomp PRIVATE ${PS5_GL_WRAPS}
   # the log written in blocks: stderr flushes at most once a second (ps5/ps5-posix.c, D7)
-  -Wl,--wrap=fflush)
+  -Wl,--wrap=fflush
+  # a present's time, measured (ps5/jsrf_ps5_gl.c, D8)
+  -Wl,--wrap=SDL_PollEvent)
 set_property(TARGET jsrf_recomp APPEND_STRING PROPERTY LINK_FLAGS " ${PS5_FINAL_LINK_FLAGS}")

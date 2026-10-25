@@ -214,10 +214,51 @@ int __wrap_SDL_GL_MakeCurrent(SDL_Window *window, SDL_GLContext context)
 	return ok ? 0 : -1;
 }
 
+/* Where a present's time goes (decision log D8): the swap and SDL's event pump, timed here, a line every two
+   seconds. */
+#include <time.h>
+static double now_ms(void)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
+}
+static double g_swap_ms, g_poll_ms, g_since;
+static unsigned g_swaps, g_polls;
+
+static void time_report(void)
+{
+	double now = now_ms();
+	if (g_since == 0.0)
+		g_since = now;
+	if (now - g_since < 2000.0)
+		return;
+	fprintf(stderr, "jsrf: present: %u swaps, %.2f ms each; %u SDL_PollEvent calls, %.3f ms each (%.0f ms of %.0f)\n",
+	        g_swaps, g_swaps ? g_swap_ms / g_swaps : 0.0, g_polls, g_polls ? g_poll_ms / g_polls : 0.0,
+	        g_swap_ms + g_poll_ms, now - g_since);
+	g_swap_ms = g_poll_ms = 0.0;
+	g_swaps = g_polls = 0;
+	g_since = now;
+}
+
 void __wrap_SDL_GL_SwapWindow(SDL_Window *window)
 {
 	(void)window;
+	double t0 = now_ms();
 	eglSwapBuffers(g_display, g_surface);
+	g_swap_ms += now_ms() - t0;
+	g_swaps++;
+	time_report();
+}
+
+int __real_SDL_PollEvent(SDL_Event *event);
+int __wrap_SDL_PollEvent(SDL_Event *event)
+{
+	double t0 = now_ms();
+	int r = __real_SDL_PollEvent(event);
+	g_poll_ms += now_ms() - t0;
+	g_polls++;
+	return r;
 }
 
 void __wrap_SDL_GL_GetDrawableSize(SDL_Window *window, int *w, int *h)
