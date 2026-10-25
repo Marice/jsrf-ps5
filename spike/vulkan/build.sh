@@ -26,7 +26,7 @@ docker run --rm -v "$here:/src" -v "$(cd "$work" && pwd):/out" rush2-ps5-build s
     cat /out/gen/vert.h /out/gen/frag.h > /out/gen/drawcost_shaders.h &&
     chown '"$(id -u):$(id -g)"' /out/gen/*'
 
-cc -std=c11 -O2 -Wall -Wextra -ffunction-sections -fdata-sections -I "$mesa/include" -I "$work/gen" \
+cc -std=c11 -O2 -Wall -Wextra -ffunction-sections -fdata-sections -I "$mesa/include" -I "$work/gen" -I "$here/../../.deps/glslang" -I "$work/glslang/include" \
     -c "$here/vk_drawcost.c" -o "$work/obj/vk_drawcost.o"
 cc -std=c++20 -O2 -fno-exceptions -fno-rtti -ffunction-sections -fdata-sections -c "$native/app_crt.cpp" -o "$work/obj/app_crt.o"
 cc -std=c++20 -O2 -fno-exceptions -fno-rtti -ffunction-sections -fdata-sections -c "$native/app_cpp_runtime.cpp" -o "$work/obj/app_cpp_runtime.o"
@@ -42,6 +42,7 @@ radv_link_recipe "$root" "$sdk_root" "$archive" || exit 2
 "$sdk_root/bin/prospero-lld" "${radv_linker_script[@]}" --eh-frame-hdr "${radv_link_flags[@]}" \
     --version-script "$native/app-symbols.map" --exclude-libs=ALL -e _start -o "$work/llvm-pie.elf" \
     "$work/obj/app_crt.o" "$work/obj/app_cpp_runtime.o" "$work/obj/vk_drawcost.o" \
+    "$work/glslang/glslang/libglslang.a" "$work/glslang/glslang/libglslang-default-resource-limits.a" \
     "$work/stubs/libSceAgc.so" "$work/stubs/libSceAgcDriver.so" "${radv_link_inputs[@]}" \
     --as-needed "$sdk_root"/target/lib/*.so
 tool link --in "$work/llvm-pie.elf" --out "$work/eboot.elf" --stub-dir "$sdk_root/target/lib" \

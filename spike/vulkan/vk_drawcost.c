@@ -19,6 +19,8 @@
 #include <time.h>
 
 #include "drawcost_shaders.h"
+#include <glslang/Include/glslang_c_interface.h>
+#include <glslang/Public/resource_limits_c.h>
 
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vk_icdGetInstanceProcAddr(VkInstance instance, const char *name);
 int sceKernelDebugOutText(int channel, const char *text);
@@ -445,6 +447,104 @@ static uint64_t frame(unsigned number, unsigned draws, int ubo)
 	return cpu;
 }
 
+/* ---- glslang on the PS5 (plan step 2): JSRF's renderer writes OpenGL-style GLSL at run time (#version 330
+   core, loose uniforms, a 192-entry constant array, sampler2Ds; src/nv2a_gl/nv2a_vsh.c, nv2a_psh.c). A Vulkan
+   backend would compile it with glslang's relaxed Vulkan rules, which put loose uniforms in a block and map
+   bindings and locations. Shaped like JSRF's: */
+static const char *const k_glsl_vs =
+	"#version 330 core\n"
+	"layout(location = 0) in vec4 v0;\nlayout(location = 3) in vec4 v3;\nlayout(location = 9) in vec4 v9;\n"
+	"uniform vec4 c[192];\nuniform vec4 viewportScale;\nuniform vec4 viewportOffset;\n"
+	"out vec4 oD0;\nout vec4 oD1;\nout vec4 oT0;\nout vec4 oT1;\nout vec4 oT2;\nout vec4 oT3;\n"
+	"void main() {\n"
+	"  vec4 R0 = vec4(dot(v0, c[96]), dot(v0, c[97]), dot(v0, c[98]), dot(v0, c[99]));\n"
+	"  vec4 R1 = max(vec4(dot(v3.xyz, c[100].xyz)), vec4(0.0));\n"
+	"  int a0 = int(c[101].x);\n"
+	"  oD0 = R1 * c[102] + c[a0 + 103];\n  oD1 = vec4(0.0);\n  oT0 = v9;\n  oT1 = v9 * c[104];\n"
+	"  oT2 = vec4(0.0);\n  oT3 = vec4(0.0);\n"
+	"  gl_Position = vec4(R0.xyz * viewportScale.xyz + viewportOffset.xyz * R0.w, R0.w);\n"
+	"}\n";
+static const char *const k_glsl_fs =
+	"#version 330 core\n"
+	"in vec4 oD0;\nin vec4 oD1;\nin vec4 oT0;\nin vec4 oT1;\nin vec4 oT2;\nin vec4 oT3;\n"
+	"uniform vec4 fogColor;\nuniform int  alphaFunc;\nuniform float alphaRef;\n"
+	"uniform sampler2D tex0;\nuniform vec2 texScale0;\nuniform vec2 texOff0;\n"
+	"uniform sampler2D tex1;\nuniform vec2 texScale1;\nuniform vec2 texOff1;\n"
+	"uniform vec4 psConst[16];\n"
+	"out vec4 frag;\n"
+	"void main() {\n"
+	"  vec4 t0 = texture(tex0, oT0.xy * texScale0 + texOff0);\n"
+	"  vec4 t1 = texture(tex1, oT1.xy * texScale1 + texOff1);\n"
+	"  vec4 r0 = mix(t0 * oD0, t1, psConst[0].a);\n"
+	"  if (alphaFunc == 5 && r0.a <= alphaRef) discard;\n"
+	"  frag = vec4(mix(fogColor.rgb, r0.rgb, oD1.a), r0.a);\n"
+	"}\n";
+
+static int glsl_to_spirv(glslang_stage_t stage, const char *source, uint32_t **words, size_t *count, char *why,
+                         size_t cap)
+{
+	const glslang_input_t input = {
+		.language = GLSLANG_SOURCE_GLSL,
+		.stage = stage,
+		.client = GLSLANG_CLIENT_VULKAN,
+		.client_version = GLSLANG_TARGET_VULKAN_1_3,
+		.target_language = GLSLANG_TARGET_SPV,
+		.target_language_version = GLSLANG_TARGET_SPV_1_6,
+		.code = source,
+		.default_version = 330,
+		.default_profile = GLSLANG_CORE_PROFILE,
+		.messages = GLSLANG_MSG_DEFAULT_BIT | GLSLANG_MSG_SPV_RULES_BIT | GLSLANG_MSG_VULKAN_RULES_BIT,
+		.resource = glslang_default_resource(),
+	};
+	glslang_shader_t *shader = glslang_shader_create(&input);
+	glslang_shader_set_options(shader, GLSLANG_SHADER_AUTO_MAP_BINDINGS | GLSLANG_SHADER_AUTO_MAP_LOCATIONS |
+	                                       GLSLANG_SHADER_VULKAN_RULES_RELAXED);
+	if (!glslang_shader_preprocess(shader, &input) || !glslang_shader_parse(shader, &input)) {
+		snprintf(why, cap, "%s", glslang_shader_get_info_log(shader));
+		glslang_shader_delete(shader);
+		return 0;
+	}
+	glslang_program_t *program = glslang_program_create();
+	glslang_program_add_shader(program, shader);
+	if (!glslang_program_link(program, GLSLANG_MSG_SPV_RULES_BIT | GLSLANG_MSG_VULKAN_RULES_BIT) ||
+	    !glslang_program_map_io(program)) {
+		snprintf(why, cap, "%s", glslang_program_get_info_log(program));
+		glslang_program_delete(program);
+		glslang_shader_delete(shader);
+		return 0;
+	}
+	glslang_program_SPIRV_generate(program, stage);
+	*count = glslang_program_SPIRV_get_size(program);
+	*words = malloc(*count * 4);
+	glslang_program_SPIRV_get(program, *words);
+	glslang_program_delete(program);
+	glslang_shader_delete(shader);
+	return 1;
+}
+
+static void glsl_check(void)
+{
+	uint64_t t0 = now_ns();
+	int ok = glslang_initialize_process();
+	report("glslang: initialised %s in %.1f ms", ok ? "ok" : "FAILED", (now_ns() - t0) / 1e6);
+	struct { const char *name; glslang_stage_t stage; const char *src; } shaders[2] = {
+		{"vertex", GLSLANG_STAGE_VERTEX, k_glsl_vs}, {"fragment", GLSLANG_STAGE_FRAGMENT, k_glsl_fs}};
+	for (int round = 0; round < 3; round++)
+		for (int i = 0; i < 2; i++) {
+			uint32_t *words = NULL;
+			size_t count = 0;
+			char why[1024] = "";
+			t0 = now_ns();
+			int r = glsl_to_spirv(shaders[i].stage, shaders[i].src, &words, &count, why, sizeof why);
+			double ms = (now_ns() - t0) / 1e6;
+			VkShaderModule m = r ? module(words, count * 4) : VK_NULL_HANDLE;
+			report("glslang: JSRF-style %s shader (round %d): %s, %zu SPIR-V words, %.2f ms; shader module %s%s%s",
+			       shaders[i].name, round + 1, r ? "compiled" : "FAILED", count, ms, m ? "ok" : "none",
+			       r ? "" : ": ", r ? "" : why);
+			free(words);
+		}
+}
+
 int main(void)
 {
 	report("JSRF Vulkan phase 0: the cost of a draw on RADV");
@@ -452,6 +552,7 @@ int main(void)
 		report("set-up failed");
 		return 1;
 	}
+	glsl_check();
 	static const unsigned counts[] = {100, 550, 1000, 2000};
 	unsigned number = 0;
 	for (int ubo = 0; ubo < 2; ubo++)
