@@ -377,26 +377,10 @@ index 8ec1ea0..2282acd 100644
          }
          if (!slash) return;
 diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
-index 2381627..01536f9 100644
+index 2381627..9a46a58 100644
 --- a/src/kernel/nv2a_pb_exec.c
 +++ b/src/kernel/nv2a_pb_exec.c
-@@ -1494,7 +1494,15 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
-      * stream as the title wrote it, not the subset that can be rasterised in
-      * software. Returns immediately unless RECOMP_GL is set. */
-     if (nv2a_gl_enabled() && subch == 0) {
-+#if defined(JSRF_PS5_RADV)
-+        /* jsrf-ps5 (V3): the front half's share of each frame, in TSC ticks (nv2a_vk.c reports it). */
-+        extern uint64_t jsrf_tsc_front;
-+        uint64_t t0 = __builtin_ia32_rdtsc();
-         nv2a_gl_method(method, param);
-+        jsrf_tsc_front += __builtin_ia32_rdtsc() - t0;
-+#else
-+        nv2a_gl_method(method, param);
-+#endif
-         /*
-          * With GL rendering, everything below this line is dead weight.
-          *
-@@ -1957,3 +1965,45 @@ void nv2a_pb_exec_report(void)
+@@ -1957,3 +1957,45 @@ void nv2a_pb_exec_report(void)
      }
      }    fflush(stderr);
  }
@@ -515,7 +499,7 @@ index ff710cf..1f67ddc 100644
          }
          if ((w & 3u) == 2u) {
 diff --git a/src/kernel/xbox_memory_layout.c b/src/kernel/xbox_memory_layout.c
-index 99d17e7..7ea4eb6 100644
+index 99d17e7..d8995fe 100644
 --- a/src/kernel/xbox_memory_layout.c
 +++ b/src/kernel/xbox_memory_layout.c
 @@ -214,6 +214,27 @@ static void nv2a_kick_signal(void)
@@ -554,7 +538,7 @@ index 99d17e7..7ea4eb6 100644
  void xbox_nv2a_kick(void)
  {
      if (s_kick_on < 0) { const char *e = getenv("RECOMP_NV2A_KICK"); s_kick_on = e ? atoi(e) : 1; }
-@@ -718,10 +740,126 @@ void xbox_nv2a_vblank_service(void)
+@@ -718,10 +740,131 @@ void xbox_nv2a_vblank_service(void)
      if (g_nv2a_memory) vblank_intr_tick((volatile uint32_t *)g_nv2a_memory);
  }
  
@@ -660,6 +644,11 @@ index 99d17e7..7ea4eb6 100644
 +    extern void ps5_present_report(double span_ms);
 +    double ps5a[3] = {0, 0, 0}, ps5a_since = 0.0, ps5a_t;
 +    unsigned long ps5a_rounds = 0;
++    {
++        /* the render thread profiler's target (jsrf-ps5 D45, ps5/ps5-posix.c) */
++        extern void jsrf_ps5_render_thread(void);
++        jsrf_ps5_render_thread();
++    }
 +#endif
      while (!InterlockedCompareExchange(&g_nv2a_ack_stop, 0, 0)) {
 +#if defined(JSRF_PS5)
@@ -681,7 +670,7 @@ index 99d17e7..7ea4eb6 100644
          vblank_intr_tick(regs);
          for (size_t i = 0; i < sizeof(NV2A_ACK) / sizeof(NV2A_ACK[0]); i++) {
              volatile uint32_t *r =
-@@ -755,6 +893,9 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -755,6 +898,9 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
          counter_mirrors_tick();
          frame_counters_tick();
          framebuffer_probe_tick();
@@ -691,7 +680,7 @@ index 99d17e7..7ea4eb6 100644
  
          /* Which framebuffer the display would be scanning out.
           *
-@@ -793,9 +934,17 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -793,9 +939,17 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
                       * The contiguous window IS the physical-address view, so
                       * OR-ing its base is the documented round trip, not a
                       * guess. */
@@ -710,7 +699,7 @@ index 99d17e7..7ea4eb6 100644
                      } else if (last_put && put < last_put) {
                          /* The ring wrapped: PUT went back to its start.
                           * The tail from the old PUT to the jump used to be
-@@ -805,10 +954,37 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -805,10 +959,37 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
                           * then from the jump's target to the new PUT. */
                          uint32_t from = XBOX_CONTIG_BASE | (last_put & 0x0FFFFFFFu);
                          uint32_t to   = XBOX_CONTIG_BASE | (put      & 0x0FFFFFFFu);
@@ -750,7 +739,7 @@ index 99d17e7..7ea4eb6 100644
                          }
                      }
                      /* Periodic, because what the title submits at init is not
-@@ -878,6 +1054,9 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -878,6 +1059,9 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
          *(volatile uint32_t *)((uintptr_t)(XBOX_KERNEL_DATA_BASE + KDATA_TICK_COUNT)
                                 + g_memory_offset) = GetTickCount();
  
@@ -760,7 +749,7 @@ index 99d17e7..7ea4eb6 100644
          /* Yield -- or actually sleep, on a host with fewer cores than the
           * runtime has busy threads. RECOMP_ACK_SLEEP_US=<n> (default 200 on
           * POSIX) keeps this thread from eating a whole core; the pushbuffer
-@@ -905,6 +1084,9 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -905,6 +1089,9 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
              else Sleep(0);
  #endif
          }
@@ -770,7 +759,7 @@ index 99d17e7..7ea4eb6 100644
      }
      return 0;
  }
-@@ -1431,7 +1613,20 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -1431,7 +1618,20 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
           */
  #if !defined(_WIN32)
          {
@@ -1154,10 +1143,10 @@ index 20c9273..1f32680 100644
              g_is_gl = 0;
 diff --git a/src/nv2a_vk/nv2a_vk.c b/src/nv2a_vk/nv2a_vk.c
 new file mode 100644
-index 0000000..76e4a6c
+index 0000000..d24e6ea
 --- /dev/null
 +++ b/src/nv2a_vk/nv2a_vk.c
-@@ -0,0 +1,3382 @@
+@@ -0,0 +1,3381 @@
 +/*
 + * The NV2A renderer's device on Vulkan (nv2a_backend.h): the third backend,
 + * beside OpenGL (nv2a_gl/nv2a_gfx_gl.c) and Metal (nv2a_metal/nv2a_metal.m).
@@ -3746,10 +3735,9 @@ index 0000000..76e4a6c
 +		const double ms = now_ms();
 +		if (last_ms > 0.0 && n_frames > last_frames) {
 +			const double per_ms = (double)(tsc - last_tsc) / (ms - last_ms), fr = (double)(n_frames - last_frames);
-+			LOG("ms a frame: %.1f in all; front half %.1f (draws %.1f, vertices %.1f in this backend); present waits %.1f\n",
-+			    (ms - last_ms) / fr, (double)(jsrf_tsc_front - last_front) / per_ms / fr,
-+			    (double)(tsc_backend - last_backend) / per_ms / fr, (double)(tsc_backend_v - last_v) / per_ms / fr,
-+			    (double)(tsc_wait - last_wait) / per_ms / fr);
++			LOG("ms a frame: %.1f in all; in this backend %.1f in draws, %.1f in vertices; present waits %.1f\n",
++			    (ms - last_ms) / fr, (double)(tsc_backend - last_backend) / per_ms / fr,
++			    (double)(tsc_backend_v - last_v) / per_ms / fr, (double)(tsc_wait - last_wait) / per_ms / fr);
 +		}
 +		last_tsc = tsc;
 +		last_ms = ms;

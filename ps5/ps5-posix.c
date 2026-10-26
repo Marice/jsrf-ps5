@@ -1004,3 +1004,97 @@ int __wrap_lstat(const char* path, struct stat* info)
 {
 	return stat(path, info);
 }
+
+
+/* --- A sampling profiler for the render thread (decision log D45) ---------
+
+   The render thread (the pushbuffer walk and the renderer) is busy ~95% of
+   its time in busy scenes; which functions that time goes to is not visible
+   from timers around whole stages. Once switched on (jsrf_prof_set), a thread
+   of its own sends the render thread a signal about every millisecond; the
+   handler counts the instruction it interrupted. Every ten seconds the 40
+   addresses counted most go to the log (llvm-symbolizer names them against
+   the ELF). The samples live in memory; ~40 log lines per ten seconds. */
+#include <ucontext.h>
+
+#define PROF_SLOTS 8192
+static pthread_t g_prof_target;
+static volatile int g_prof_have, g_prof_on, g_prof_started;
+static struct { uintptr_t pc; uint32_t n; } g_prof_hist[PROF_SLOTS];
+static volatile uint32_t g_prof_total, g_prof_lost;
+
+void jsrf_ps5_render_thread(void)
+{
+	g_prof_target = pthread_self();
+	g_prof_have = 1;
+}
+
+static void prof_sample(int signal_number, siginfo_t* info, void* context)
+{
+	(void)signal_number;
+	(void)info;
+	const uintptr_t pc = (uintptr_t)((const ucontext_t*)context)->uc_mcontext.mc_rip;
+	uint32_t h = (uint32_t)((pc >> 2) * 2654435761u) & (PROF_SLOTS - 1);
+	g_prof_total++;
+	for (int i = 0; i < 16; i++) {
+		uint32_t k = (h + (uint32_t)i) & (PROF_SLOTS - 1);
+		if (g_prof_hist[k].pc == pc || g_prof_hist[k].pc == 0) {
+			g_prof_hist[k].pc = pc;
+			g_prof_hist[k].n++;
+			return;
+		}
+	}
+	g_prof_lost++;
+}
+
+static void* prof_thread(void* unused)
+{
+	(void)unused;
+	unsigned ticks = 0;
+	for (;;) {
+		usleep(1000);
+		if (!g_prof_on || !g_prof_have) continue;
+		pthread_kill(g_prof_target, SIGUSR2);
+		if (++ticks < 10000 || g_prof_total == 0) continue;
+		ticks = 0;
+		/* the 40 counted most, then start over */
+		static struct { uintptr_t pc; uint32_t n; } top[40];
+		memset(top, 0, sizeof top);
+		for (int k = 0; k < PROF_SLOTS; k++) {
+			const uint32_t n = g_prof_hist[k].n;
+			if (n <= top[39].n) continue;
+			int j = 39;
+			while (j > 0 && top[j - 1].n < n) { top[j] = top[j - 1]; j--; }
+			top[j].pc = g_prof_hist[k].pc;
+			top[j].n = n;
+		}
+		const uint32_t total = g_prof_total, lost = g_prof_lost;
+		fprintf(stderr, "  [PROF] %u samples of the render thread (%u not placed); the most counted:\n", total, lost);
+		for (int j = 0; j < 40 && top[j].n; j++)
+			fprintf(stderr, "  [PROF] %p %u %.1f%%\n", (void*)top[j].pc, top[j].n, 100.0 * top[j].n / total);
+		memset(g_prof_hist, 0, sizeof g_prof_hist);
+		g_prof_total = g_prof_lost = 0;
+	}
+	return NULL;
+}
+
+void jsrf_prof_set(int on)
+{
+	if (on && !g_prof_started) {
+		struct sigaction action;
+		memset(&action, 0, sizeof(action));
+		action.sa_sigaction = prof_sample;
+		action.sa_flags = SA_SIGINFO | SA_RESTART | SA_ONSTACK;
+		sigemptyset(&action.sa_mask);
+		sigaction(SIGUSR2, &action, NULL);
+		pthread_t t;
+		if (__real_pthread_create(&t, NULL, prof_thread, NULL) == 0) {
+			pthread_detach(t);
+			g_prof_started = 1;
+			fprintf(stderr, "jsrf: render thread profiler started\n");
+		}
+	}
+	if (on != g_prof_on)
+		fprintf(stderr, "jsrf: render thread profiler %s\n", on ? "on" : "off");
+	g_prof_on = on;
+}

@@ -228,6 +228,7 @@ enum { MP_UP = 0x10, MP_RIGHT = 0x20, MP_DOWN = 0x40, MP_LEFT = 0x80, MP_CROSS =
 static const struct { uint32_t bit; const char *name; } kModes[] = {
 	{1, "RESOLVE BEFORE SAMPLING"}, {2, "NEW TARGETS ALPHA 1"}, {4, "NO CULLING"}, {8, "SURFACE TRACE"},
 	{16, "CAPTURE FRAME"}, {32, "DECAL DEPTH BIAS"}, {64, "BLENDED NO DEPTH"},
+	{128, "CPU PROFILE"},
 };
 enum { N_MODES = sizeof kModes / sizeof kModes[0], OVL_W = 384, OVL_H = 6 + 18 * (N_MODES + 1) + 4 };
 
@@ -249,6 +250,10 @@ void jsrf_ps5_frame_hook(void)
 			return;
 		fprintf(stderr, "jsrf: test modes: pad handle %d; modes %x (hold the touchpad to change them)\n", pad,
 		        jsrf_vk_modes);
+	}
+	{
+		void jsrf_prof_set(int on); /* ps5/ps5-posix.c */
+		jsrf_prof_set((jsrf_vk_modes & 128) != 0);
 	}
 	mode_pad_state st;
 	if (scePadReadState(pad, &st) != 0)
