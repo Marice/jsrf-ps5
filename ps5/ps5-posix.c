@@ -25,6 +25,20 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+/* The Vulkan build (decision log D34): the platform layer of the SDK fork wraps
+   pthread_create (thread stacks in direct memory) and fflush itself, and a name
+   is wrapped once. Ours run first under their own names, which the rest of the
+   build calls (ps5-vk.cmake), and hand on to the platform's: pthread_create here
+   is the platform's wrap, __real_fflush still libc's (the linker's --wrap). */
+#if defined(JSRF_PS5_RADV)
+#undef pthread_create
+#undef fflush
+int fflush(FILE* stream); /* stdio.h declared it under the other name */
+#define __wrap_pthread_create jsrf_pthread_create
+#define __real_pthread_create pthread_create
+#define __wrap_fflush jsrf_fflush
+#endif
+
 /* The title folder. It is writable when the title runs from ShadowMountPlus,
    which is where the game keeps its log, and it is the only folder a title
    can count on being able to reach. */

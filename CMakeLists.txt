@@ -8,6 +8,12 @@ set(NV2A_GL_CONTEXT "sdl" CACHE STRING "" FORCE)
 set(JSRF_PS5 ON)
 add_compile_definitions(JSRF_PS5=1)
 add_compile_options(-Wno-unused-command-line-argument)
+if(JSRF_PS5_VULKAN)
+  # Mihawk's RADV instead of the OpenGL SDK (ps5/ps5-vk.cmake, decision log D34): upstream's renderer without its
+  # OpenGL device, and our pthread_create and fflush ahead of the platform layer's wraps of the same names.
+  add_compile_definitions(JSRF_PS5_RADV=1 pthread_create=jsrf_pthread_create fflush=jsrf_fflush)
+  set(NV2A_GL_CONTEXT "none" CACHE STRING "" FORCE)
+endif()
 
 # pthreads are in the PS5's libc and libkernel: FindThreads (src/platform) is told so.
 set(CMAKE_HAVE_LIBC_PTHREAD TRUE CACHE BOOL "" FORCE)
@@ -15,10 +21,20 @@ set(THREADS_PREFER_PTHREAD_FLAG OFF)
 
 add_subdirectory(src-upstream/port "${CMAKE_BINARY_DIR}/port")
 
+if(JSRF_PS5_VULKAN)
+  target_sources(jsrf_recomp PRIVATE ps5/jsrf_ps5_vk.c ps5/jsrf_ps5_main.c ${PROSPERO_SUPPORT_SOURCES})
+else()
 target_sources(jsrf_recomp PRIVATE ps5/jsrf_ps5_gl.c ps5/jsrf_ps5_main.c ps5/jsrf_ps5_screen.c
   ${PROSPERO_SUPPORT_SOURCES})
+endif()
 target_include_directories(jsrf_recomp PRIVATE src-upstream/port)
 target_include_directories(jsrf_recomp PRIVATE ps5)
+if(JSRF_PS5_VULKAN)
+  target_link_libraries(jsrf_recomp PRIVATE SDL2::SDL2-static m)
+  # a title's lstat refuses every path; stat does not (ps5/ps5-posix.c, D28)
+  target_link_options(jsrf_recomp PRIVATE -Wl,--wrap=lstat)
+  return()
+endif()
 target_link_libraries(jsrf_recomp PRIVATE SDL2::SDL2-static OpenGL::GL m)
 set(PS5_GL_WRAPS
   -Wl,--wrap=SDL_CreateWindow -Wl,--wrap=SDL_GL_CreateContext -Wl,--wrap=SDL_GL_DeleteContext

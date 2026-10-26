@@ -754,11 +754,47 @@ index 99d17e7..5fc8334 100644
      }
      return 0;
  }
+diff --git a/src/nv2a_gl/CMakeLists.txt b/src/nv2a_gl/CMakeLists.txt
+index 257ba1c..d2483d8 100644
+--- a/src/nv2a_gl/CMakeLists.txt
++++ b/src/nv2a_gl/CMakeLists.txt
+@@ -24,6 +24,21 @@ if(IOS)
+     return()
+ endif()
+ 
++# No OpenGL and no Metal: the PS5's Vulkan build (jsrf-ps5 decision log D34),
++# whose device comes later. nv2a_gl.c without its OpenGL device, as on iOS.
++if(NV2A_GL_CONTEXT STREQUAL "none")
++    add_library(xbox_nv2a_gl STATIC
++        nv2a_vsh.c nv2a_vsh_interp.c nv2a_psh.c nv2a_uniforms.c nv2a_gl.c
++        nv2a_shader_cache.c nv2a_smaa.c)
++    target_include_directories(xbox_nv2a_gl PUBLIC
++        ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/../d3d)
++    target_compile_definitions(xbox_nv2a_gl PUBLIC NV2A_GL_USE_NONE=1)
++    target_link_libraries(xbox_nv2a_gl PUBLIC m)
++    target_compile_options(xbox_nv2a_gl PRIVATE -Wall -Wextra -O2)
++    message(STATUS "nv2a_gl context: none")
++    return()
++endif()
++
+ set(NV2A_GL_SOURCES
+     nv2a_vsh.c
+     nv2a_vsh_interp.c
 diff --git a/src/nv2a_gl/nv2a_gl.c b/src/nv2a_gl/nv2a_gl.c
-index 75b66db..0b10a60 100644
+index 75b66db..8e26744 100644
 --- a/src/nv2a_gl/nv2a_gl.c
 +++ b/src/nv2a_gl/nv2a_gl.c
-@@ -1757,18 +1757,169 @@ static void sdl_menu_command(unsigned id)
+@@ -1084,6 +1084,9 @@ static uint32_t fnv(const void *p, size_t n)
+ 
+ #if defined(NV2A_GL_USE_NONE)
+ 
++/* The PS5's present timing (jsrf-ps5 D13) is the SDL present's; not here. */
++#define PS5P_T(k) ((void)0)
++
+ /* No OpenGL in this build: Metal or nothing. */
+ static int gl_init(uint32_t w, uint32_t h)
+ {
+@@ -1757,18 +1760,169 @@ static void sdl_menu_command(unsigned id)
   * 16:9 (the 640x480 surface holds a 16:9 view squeezed), anything else at its
   * own shape. One blit; every piece of GL state the renderer caches is put
   * back the way it was. */
@@ -928,7 +964,7 @@ index 75b66db..0b10a60 100644
      if (ww <= 0 || wh <= 0) return;
      if (nv2a_wide_scene()) { fw = (int)(nv2a_wide_aspect() * 900.0f + 0.5f); fh = 900; }   /* 16:9 = 1600:900 */
      dw = ww; dh = wh;
-@@ -1776,21 +1927,32 @@ static void sdl_present(GLuint src_fbo, int sw, int sh)
+@@ -1776,21 +1930,32 @@ static void sdl_present(GLuint src_fbo, int sw, int sh)
      else                               dh = (int)((long)ww * fh / fw);
      glDisable(GL_SCISSOR_TEST);
      glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
@@ -961,7 +997,7 @@ index 75b66db..0b10a60 100644
      { static int said;
        if (said < 3) {
            said++;
-@@ -5061,6 +5223,10 @@ static void do_draw_body(void)
+@@ -5061,6 +5226,10 @@ static void do_draw_body(void)
       */
      {
          uint32_t inputs = g_pcache[slot].inputs;
@@ -972,7 +1008,7 @@ index 75b66db..0b10a60 100644
          for (i = 0; i < NUM_ATTRS; i++) {
              const Attr *a = &S.attr[i];
              attr_at[i] = -1;
-@@ -5069,6 +5235,28 @@ static void do_draw_body(void)
+@@ -5069,6 +5238,28 @@ static void do_draw_body(void)
                  const_mask |= 1u << i;
                  continue;
              }
@@ -1001,11 +1037,11 @@ index 75b66db..0b10a60 100644
              live[nlive].base = inl
                  ? (const uint8_t *)S.inline_buf + a->offset
                  : guest(resolve(a->offset));
-@@ -9618,11 +9806,17 @@ static void present(int is_frame)
+@@ -9618,11 +9809,17 @@ static void present(int is_frame)
          }
      }
  
-+#if defined(JSRF_PS5)
++#if defined(JSRF_PS5) && defined(NV2A_GL_USE_SDL)
 +    double _ps5p = ps5_prof_ms();
 +    if (is_frame) g_ps5p_frames++;
 +#endif
@@ -1019,7 +1055,7 @@ index 75b66db..0b10a60 100644
  
      /* Put the finished frame on screen: the surface the title has set up
       * when it flips, which is what the window showed while surfaces were
-@@ -9667,13 +9861,24 @@ static void present(int is_frame)
+@@ -9667,13 +9864,24 @@ static void present(int is_frame)
              if (g_presenter == 1) sdl_hand_over(nv2a_gfx_gl_fbo(prt), (int)pw, (int)ph);
              else
  #endif
