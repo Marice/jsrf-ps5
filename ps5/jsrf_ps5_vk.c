@@ -11,6 +11,10 @@ int jsrf_ps5_status_begin(void)
 {
 	/* RADV reads its options through our getenv (ps5-posix.c): its error messages into the log. */
 	setenv("MESA_DEBUG", "1", 0);
+	/* The V3 measurement run (D40): the graffiti surfaces traced, and fast clears off so that what is read back is
+	 * what was drawn, not memory from before a clear. */
+	setenv("JSRF_VK_SURFTRACE", "1", 0);
+	setenv("RADV_DEBUG", "nofastclears", 0);
 	return 0;
 }
 

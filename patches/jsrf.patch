@@ -1154,10 +1154,10 @@ index 20c9273..1f32680 100644
              g_is_gl = 0;
 diff --git a/src/nv2a_vk/nv2a_vk.c b/src/nv2a_vk/nv2a_vk.c
 new file mode 100644
-index 0000000..b7e03db
+index 0000000..75d8f01
 --- /dev/null
 +++ b/src/nv2a_vk/nv2a_vk.c
-@@ -0,0 +1,2150 @@
+@@ -0,0 +1,2478 @@
 +/*
 + * The NV2A renderer's device on Vulkan (nv2a_backend.h): the third backend,
 + * beside OpenGL (nv2a_gl/nv2a_gfx_gl.c) and Metal (nv2a_metal/nv2a_metal.m).
@@ -1199,6 +1199,7 @@ index 0000000..b7e03db
 +#include <stdio.h>
 +#include <stdlib.h>
 +#include <string.h>
++#include <sys/stat.h>
 +#include <time.h>
 +
 +#include <glslang/Include/glslang_c_interface.h>
@@ -1313,6 +1314,12 @@ index 0000000..b7e03db
 +	Dead *dead;
 +	int ndead, capdead;
 +} Frame;
++
++/* The surface trace (V3, JSRF_VK_SURFTRACE): see trace_* below. */
++static void trace_bind(uint32_t from, uint32_t to);
++static void trace_clear(unsigned mask, const float rgba[4], const uint32_t rect[4]);
++static void trace_draw(int prim, uint32_t count);
++static void trace_frame_done(int slot);
 +
 +static VkInstance g_instance;
 +static VkPhysicalDevice g_phys;
@@ -1510,6 +1517,7 @@ index 0000000..b7e03db
 +{
 +	Frame *f = &g_fr[g_slot];
 +	vkWaitForFences(g_dev, 1, &f->done, VK_TRUE, UINT64_MAX);
++	trace_frame_done(g_slot);
 +	bury(f);
 +	for (int i = 0; i < f->npools; i++)
 +		vkResetDescriptorPool(g_dev, f->pools[i], 0);
@@ -1861,6 +1869,7 @@ index 0000000..b7e03db
 +{
 +	if (!rt_ok(h) || h == g_cur_rt)
 +		return;
++	trace_bind(g_cur_rt, h);
 +	pass_end();
 +	g_cur_rt = h;
 +}
@@ -2670,6 +2679,323 @@ index 0000000..b7e03db
 +	return pipe;
 +}
 +
++
++/*
++ * The surface trace (V3, decision log D40): JSRF_VK_SURFTRACE=1. The graffiti and the boost haze are drawn into
++ * small surfaces (not 4:3, e.g. 512x512) that the frame then samples, and come out wrong here only. For each such
++ * surface this logs what is done to it -- an "episode" from being bound to being left: its clears, its draws and
++ * their state -- and what it holds: three rows of pixels copied out on the GPU when it is left and when it is first
++ * sampled after that, read on the CPU once that frame's fence has passed, so nothing about the drawing changes.
++ * The first sampled pictures of each go to /app0/vkdump as BMP files. Repeats of an episode are counted, not logged.
++ */
++#define TR_PROBES 48
++#define TR_DUMPS 16
++static int g_tr = -1;
++static unsigned tr_lines;
++static struct {
++	int open;              /* an episode is going on */
++	uint32_t clears, draws, nprog, prog[4];
++	uint32_t states[6], nstates, samples_tex;
++	char clear_txt[160];
++	uint64_t sig;
++	int sampled_since;     /* sampled since the episode ended */
++	float clear_rgba[4];
++	uint32_t episodes;
++} g_trs[MAX_RT];
++static struct { uint64_t sig; uint32_t n; } g_tr_seen[256];
++static struct {
++	VkBuffer buf;
++	VkDeviceMemory mem;
++	uint8_t *map;
++	uint32_t used, n;
++	struct { uint32_t rt, w, at; int kind; uint64_t sig; } p[TR_PROBES];
++} g_trp[FRAMES];
++static struct {
++	VkBuffer buf;
++	VkDeviceMemory mem;
++	uint8_t *map;
++	uint32_t cap;
++	int pending, slot;
++	uint32_t rt, w, h, n;
++} g_trd;
++
++static int tr_on(void)
++{
++	if (g_tr < 0) {
++		const char *v = getenv("JSRF_VK_SURFTRACE");
++		g_tr = v && *v && *v != '0';
++		if (g_tr) {
++			for (int i = 0; i < FRAMES; i++)
++				if (!host_buffer(4u << 20, VK_BUFFER_USAGE_TRANSFER_DST_BIT, &g_trp[i].buf, &g_trp[i].mem,
++				                 &g_trp[i].map))
++					g_tr = 0;
++			mkdir("/app0/vkdump", 0777);
++			LOG("surface trace on\n");
++		}
++	}
++	return g_tr;
++}
++
++static int tr_traced(uint32_t h)
++{
++	return rt_ok(h) && (uint64_t)g_rt[h - 1].pw * 3 != (uint64_t)g_rt[h - 1].ph * 4;
++}
++
++static int tr_say(void)
++{
++	return tr_lines++ < 6000;
++}
++
++static uint64_t tr_mix(uint64_t h, uint64_t v)
++{
++	return (h ^ v) * 1099511628211ull;
++}
++
++/* Three rows of `h` copied into this frame's probe buffer, in the command stream where it stands. */
++static void tr_probe(uint32_t h, int kind, uint64_t sig)
++{
++	Frame *f = &g_fr[g_slot];
++	(void)f;
++	VkRT *rt = &g_rt[h - 1];
++	uint32_t row = rt->pw * 4, need = row * 3;
++	if (g_trp[g_slot].n >= TR_PROBES || g_trp[g_slot].used + need > (4u << 20))
++		return;
++	uint32_t at = g_trp[g_slot].used;
++	uint32_t keep = g_cur_rt;
++	pass_end();
++	VkCommandBuffer c = cmd();
++	barrier_all(c);
++	VkBufferImageCopy r[3];
++	for (int i = 0; i < 3; i++)
++		r[i] = (VkBufferImageCopy){.bufferOffset = at + (uint32_t)i * row,
++		                           .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
++		                           .imageOffset = {0, (int32_t)(rt->ph * (uint32_t)(i + 1) / 4), 0},
++		                           .imageExtent = {rt->pw, 1, 1}};
++	vkCmdCopyImageToBuffer(c, g_tex[rt->color - 1].image, VK_IMAGE_LAYOUT_GENERAL, g_trp[g_slot].buf, 3, r);
++	barrier_all(c);
++	g_cur_rt = keep;
++	g_trp[g_slot].p[g_trp[g_slot].n++] = (typeof(g_trp[0].p[0])){h, rt->pw, at, kind, sig};
++	g_trp[g_slot].used += need;
++}
++
++/* The whole of `h` copied out once, for a BMP. */
++static void tr_dump(uint32_t h)
++{
++	VkRT *rt = &g_rt[h - 1];
++	uint64_t bytes = (uint64_t)rt->pw * rt->ph * 4;
++	if (g_trd.pending || g_trd.n >= TR_DUMPS || bytes > (64u << 20))
++		return;
++	if (bytes > g_trd.cap) {
++		if (g_trd.buf) {
++			vkDeviceWaitIdle(g_dev);
++			vkDestroyBuffer(g_dev, g_trd.buf, NULL);
++			vkFreeMemory(g_dev, g_trd.mem, NULL);
++			g_trd.buf = VK_NULL_HANDLE;
++		}
++		if (!host_buffer(bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, &g_trd.buf, &g_trd.mem, &g_trd.map))
++			return;
++		g_trd.cap = (uint32_t)bytes;
++	}
++	uint32_t keep = g_cur_rt;
++	pass_end();
++	VkCommandBuffer c = cmd();
++	barrier_all(c);
++	VkBufferImageCopy r = {.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .imageExtent = {rt->pw, rt->ph, 1}};
++	vkCmdCopyImageToBuffer(c, g_tex[rt->color - 1].image, VK_IMAGE_LAYOUT_GENERAL, g_trd.buf, 1, &r);
++	barrier_all(c);
++	g_cur_rt = keep;
++	g_trd.pending = 1;
++	g_trd.slot = g_slot;
++	g_trd.rt = h;
++	g_trd.w = rt->pw;
++	g_trd.h = rt->ph;
++}
++
++static void tr_write_bmp(void)
++{
++	char name[96];
++	uint32_t step = (g_trd.w + 767) / 768, w = g_trd.w / step, h = g_trd.h / step;
++	snprintf(name, sizeof name, "/app0/vkdump/%02u_rt%u_%ux%u.bmp", g_trd.n, g_trd.rt, g_trd.w, g_trd.h);
++	FILE *fp = fopen(name, "wb");
++	g_trd.n++;
++	if (!fp)
++		return;
++	uint32_t rowb = (w * 3 + 3) & ~3u, size = 54 + rowb * h;
++	uint8_t hd[54] = {'B', 'M'};
++	memcpy(hd + 2, &size, 4);
++	uint32_t v = 54; memcpy(hd + 10, &v, 4);
++	v = 40; memcpy(hd + 14, &v, 4);
++	memcpy(hd + 18, &w, 4);
++	memcpy(hd + 22, &h, 4);
++	uint16_t planes = 1, bits = 24; memcpy(hd + 26, &planes, 2); memcpy(hd + 28, &bits, 2);
++	fwrite(hd, 1, 54, fp);
++	uint8_t *line = calloc(1, rowb);
++	for (uint32_t y = 0; y < h && line; y++) {
++		const uint8_t *src = g_trd.map + (size_t)((h - 1 - y) * step) * g_trd.w * 4; /* BMP rows bottom-up */
++		for (uint32_t x = 0; x < w; x++) {
++			const uint8_t *px = src + (size_t)x * step * 4;
++			line[x * 3 + 0] = px[2];
++			line[x * 3 + 1] = px[1];
++			line[x * 3 + 2] = px[0];
++		}
++		fwrite(line, 1, rowb, fp);
++	}
++	free(line);
++	fclose(fp);
++	LOG("trace: wrote %s\n", name);
++}
++
++static void trace_frame_done(int slot)
++{
++	if (g_tr <= 0)
++		return;
++	for (uint32_t i = 0; i < g_trp[slot].n; i++) {
++		typeof(g_trp[0].p[0]) *q = &g_trp[slot].p[i];
++		const uint8_t *px = g_trp[slot].map + q->at;
++		uint32_t n = q->w * 3, lit = 0, a0 = 0;
++		double sr = 0, sg = 0, sb = 0, sa = 0;
++		for (uint32_t k = 0; k < n; k++, px += 4) {
++			if (px[0] | px[1] | px[2]) lit++;
++			if (!px[3]) a0++;
++			sr += px[0]; sg += px[1]; sb += px[2]; sa += px[3];
++		}
++		if (tr_say())
++			LOG("trace: f%llu rt %u %s: %u%% not black, %u%% alpha 0, mean rgba %.0f %.0f %.0f %.0f (episode %016llx)\n",
++			    (unsigned long long)n_frames, q->rt, q->kind ? "when sampled" : "when left", lit * 100 / n, a0 * 100 / n, sr / n, sg / n, sb / n,
++			    sa / n, (unsigned long long)q->sig);
++	}
++	g_trp[slot].n = 0;
++	g_trp[slot].used = 0;
++	if (g_trd.pending && g_trd.slot == slot) {
++		tr_write_bmp();
++		g_trd.pending = 0;
++	}
++}
++
++static void trace_bind(uint32_t from, uint32_t to)
++{
++	if (!tr_on())
++		return;
++	if (tr_traced(from) && g_trs[from - 1].open) {
++		typeof(g_trs[0]) *t = &g_trs[from - 1];
++		t->open = 0;
++		t->sampled_since = 0;
++		uint64_t sig = tr_mix(tr_mix(tr_mix(14695981039346656037ull, from), t->clears), t->draws > 8 ? 9 : t->draws);
++		for (uint32_t i = 0; i < t->nstates; i++)
++			sig = tr_mix(sig, t->states[i]);
++		t->sig = sig;
++		uint32_t k = (uint32_t)(sig % 256);
++		if (g_tr_seen[k].sig != sig) {
++			g_tr_seen[k].sig = sig;
++			g_tr_seen[k].n = 0;
++		}
++		if (g_tr_seen[k].n++ < 3) {
++			if (tr_say()) {
++				LOG("trace: f%llu rt %u (%ux%u) episode %016llx, %s time: clears%s; %u draws, %u programs, states",
++				    (unsigned long long)n_frames, from,
++				    g_rt[from - 1].pw, g_rt[from - 1].ph, (unsigned long long)sig,
++				    g_tr_seen[k].n == 1 ? "first" : "again", t->clears ? t->clear_txt : " none", t->draws, t->nprog);
++				for (uint32_t i = 0; i < t->nstates; i++)
++					fprintf(stderr, " %08x", t->states[i]);
++				fprintf(stderr, "; samples a target %u times\n", t->samples_tex);
++			}
++			tr_probe(from, 0, sig);
++		}
++	}
++	if (tr_traced(to)) {
++		typeof(g_trs[0]) *t = &g_trs[to - 1];
++		uint32_t keep_sampled = t->sampled_since;
++		uint64_t keep_sig = t->sig;
++		float keep_clear[4];
++		memcpy(keep_clear, t->clear_rgba, sizeof keep_clear);
++		uint32_t ep = t->episodes + 1;
++		memset(t, 0, sizeof *t);
++		t->open = 1;
++		t->episodes = ep;
++		t->sampled_since = (int)keep_sampled;
++		t->sig = keep_sig;
++		memcpy(t->clear_rgba, keep_clear, sizeof keep_clear);
++	}
++}
++
++static void trace_clear(unsigned mask, const float rgba[4], const uint32_t rect[4])
++{
++	if (g_tr <= 0 || !tr_traced(g_cur_rt) || !g_trs[g_cur_rt - 1].open)
++		return;
++	typeof(g_trs[0]) *t = &g_trs[g_cur_rt - 1];
++	size_t at = strlen(t->clear_txt);
++	if (t->clears < 3 && at < sizeof t->clear_txt - 60) {
++		if (rect)
++			snprintf(t->clear_txt + at, sizeof t->clear_txt - at, " [mask %u, %.2f %.2f %.2f %.2f, rect %u,%u-%u,%u]",
++			         mask, rgba[0], rgba[1], rgba[2], rgba[3], rect[0], rect[1], rect[2], rect[3]);
++		else
++			snprintf(t->clear_txt + at, sizeof t->clear_txt - at, " [mask %u, %.2f %.2f %.2f %.2f, all]", mask,
++			         rgba[0], rgba[1], rgba[2], rgba[3]);
++	}
++	if (mask & 1)
++		memcpy(t->clear_rgba, rgba, sizeof t->clear_rgba);
++	t->clears++;
++}
++
++static void trace_draw(int prim, uint32_t count)
++{
++	(void)count;
++	if (g_tr <= 0)
++		return;
++	/* this draw's state, in one word: blend, its factors, the colour mask, depth, stencil, the topology */
++	if (tr_traced(g_cur_rt) && g_trs[g_cur_rt - 1].open) {
++		typeof(g_trs[0]) *t = &g_trs[g_cur_rt - 1];
++		uint32_t cm = g_rs.color_mask ? g_rs.color_mask : 0x01010101u;
++		uint32_t st = (uint32_t)(g_rs.blend_enable != 0) << 31 | ((uint32_t)g_rs.blend_src & 0xF) << 27 |
++		              ((uint32_t)g_rs.blend_dst & 0xF) << 23 | ((cm >> 24) & 1) << 22 | ((cm >> 16) & 1) << 21 |
++		              ((cm >> 8) & 1) << 20 | (cm & 1) << 19 | (uint32_t)(g_rs.depth_test != 0) << 18 |
++		              (uint32_t)(g_rs.depth_write != 0) << 17 | ((uint32_t)g_rs.depth_func & 0xF) << 13 |
++		              (uint32_t)(g_rs.stencil_test != 0) << 12 | (uint32_t)(g_rs.alpha_test != 0) << 11 |
++		              (uint32_t)(g_rs.cull_enable != 0) << 10 | ((uint32_t)prim & 0xF) << 6 |
++		              (prog_ok(g_cur_prog) ? g_prog[g_cur_prog - 1].samplers & 0xF : 0);
++		uint32_t i;
++		for (i = 0; i < t->nstates && t->states[i] != st; i++)
++			;
++		if (i == t->nstates && t->nstates < 6)
++			t->states[t->nstates++] = st;
++		for (i = 0; i < t->nprog && t->prog[i] != g_cur_prog; i++)
++			;
++		if (i == t->nprog && t->nprog < 4)
++			t->prog[t->nprog++] = g_cur_prog;
++		t->draws++;
++	}
++	/* a traced target sampled by this draw: the first time since it was last left */
++	if (!prog_ok(g_cur_prog))
++		return;
++	uint32_t smp = g_prog[g_cur_prog - 1].samplers;
++	for (int u = 0; u < 4; u++) {
++		if (!((smp >> u) & 1) || !tex_ok(g_bound[u]) || !g_tex[g_bound[u] - 1].is_target)
++			continue;
++		uint32_t r;
++		for (r = 1; r <= MAX_RT; r++)
++			if (g_rt[r - 1].used && g_rt[r - 1].color == g_bound[u])
++				break;
++		if (r > MAX_RT || !tr_traced(r))
++			continue;
++		if (tr_traced(g_cur_rt) && g_trs[g_cur_rt - 1].open)
++			g_trs[g_cur_rt - 1].samples_tex++;
++		typeof(g_trs[0]) *t = &g_trs[r - 1];
++		if (t->sampled_since || t->open)
++			continue;
++		t->sampled_since = 1;
++		uint32_t k = (uint32_t)(t->sig % 256);
++		if (g_tr_seen[k].sig == t->sig && g_tr_seen[k].n <= 3) {
++			if (tr_say())
++				LOG("trace: f%llu rt %u sampled on unit %u by a draw into rt %u (%ux%u), blend %d %x/%x, mask %08x\n",
++				    (unsigned long long)n_frames, r, u,
++				    g_cur_rt, g_rt[g_cur_rt - 1].pw, g_rt[g_cur_rt - 1].ph, g_rs.blend_enable, g_rs.blend_src,
++				    g_rs.blend_dst, g_rs.color_mask);
++			tr_probe(r, 1, t->sig);
++			tr_dump(r);
++		}
++	}
++}
++
 +/* Where a frame's time goes (V3), in TSC ticks: the front half's method handling (nv2a_pb_exec.c), the part of it in
 + * this backend's draws and vertices, and present's waits (the swapchain image and the frame slot's fence). */
 +uint64_t jsrf_tsc_front;
@@ -2886,6 +3212,7 @@ index 0000000..b7e03db
 +		vkCmdDraw(c, count, 1, 0, 0);
 +	}
 +	n_draws++;
++	trace_draw(prim, count);
 +}
 +
 +/* ---- clears and the flip -------------------------------------------------------------------------------------- */
@@ -2915,6 +3242,7 @@ index 0000000..b7e03db
 +	}
 +	VkClearRect cr = {{{(int32_t)x0, (int32_t)y0}, {x1 - x0, y1 - y0}}, 0, 1};
 +	vkCmdClearAttachments(cmd(), n, at, 1, &cr);
++	trace_clear(mask, rgba, rect);
 +}
 +
 +static void vk_present(uint32_t h, uint32_t pw, uint32_t ph)
