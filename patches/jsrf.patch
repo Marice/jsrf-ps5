@@ -377,10 +377,26 @@ index 8ec1ea0..2282acd 100644
          }
          if (!slash) return;
 diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
-index 2381627..9a46a58 100644
+index 2381627..01536f9 100644
 --- a/src/kernel/nv2a_pb_exec.c
 +++ b/src/kernel/nv2a_pb_exec.c
-@@ -1957,3 +1957,45 @@ void nv2a_pb_exec_report(void)
+@@ -1494,7 +1494,15 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+      * stream as the title wrote it, not the subset that can be rasterised in
+      * software. Returns immediately unless RECOMP_GL is set. */
+     if (nv2a_gl_enabled() && subch == 0) {
++#if defined(JSRF_PS5_RADV)
++        /* jsrf-ps5 (V3): the front half's share of each frame, in TSC ticks (nv2a_vk.c reports it). */
++        extern uint64_t jsrf_tsc_front;
++        uint64_t t0 = __builtin_ia32_rdtsc();
+         nv2a_gl_method(method, param);
++        jsrf_tsc_front += __builtin_ia32_rdtsc() - t0;
++#else
++        nv2a_gl_method(method, param);
++#endif
+         /*
+          * With GL rendering, everything below this line is dead weight.
+          *
+@@ -1957,3 +1965,45 @@ void nv2a_pb_exec_report(void)
      }
      }    fflush(stderr);
  }
@@ -1138,10 +1154,10 @@ index 20c9273..1f32680 100644
              g_is_gl = 0;
 diff --git a/src/nv2a_vk/nv2a_vk.c b/src/nv2a_vk/nv2a_vk.c
 new file mode 100644
-index 0000000..dcab2e4
+index 0000000..b7e03db
 --- /dev/null
 +++ b/src/nv2a_vk/nv2a_vk.c
-@@ -0,0 +1,2082 @@
+@@ -0,0 +1,2150 @@
 +/*
 + * The NV2A renderer's device on Vulkan (nv2a_backend.h): the third backend,
 + * beside OpenGL (nv2a_gl/nv2a_gfx_gl.c) and Metal (nv2a_metal/nv2a_metal.m).
@@ -1624,6 +1640,7 @@ index 0000000..dcab2e4
 +	vkGetImageMemoryRequirements(g_dev, *img, &req);
 +	*mem = mem_alloc(req, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 +	if (!*mem || vkBindImageMemory(g_dev, *img, *mem, 0) != VK_SUCCESS) {
++		LOG("no memory for a %ux%u image (%llu bytes)\n", w, h, (unsigned long long)req.size);
 +		vkDestroyImage(g_dev, *img, NULL);
 +		return 0;
 +	}
@@ -2425,8 +2442,19 @@ index 0000000..dcab2e4
 +
 +/* ---- vertices, pipelines, draws ------------------------------------------------------------------------------- */
 +
++static void vk_vertices_body(const float *v, uint32_t nverts, uint32_t stride_floats, const int attr_at[16],
++                             uint32_t const_mask, const float const_attr[16][4]);
++static uint64_t tsc_backend_v;
 +static void vk_vertices(const float *v, uint32_t nverts, uint32_t stride_floats, const int attr_at[16],
 +                        uint32_t const_mask, const float const_attr[16][4])
++{
++	uint64_t t0 = __builtin_ia32_rdtsc();
++	vk_vertices_body(v, nverts, stride_floats, attr_at, const_mask, const_attr);
++	tsc_backend_v += __builtin_ia32_rdtsc() - t0;
++}
++
++static void vk_vertices_body(const float *v, uint32_t nverts, uint32_t stride_floats, const int attr_at[16],
++                             uint32_t const_mask, const float const_attr[16][4])
 +{
 +	uint32_t bytes = nverts * stride_floats * 4;
 +	void *p;
@@ -2642,12 +2670,32 @@ index 0000000..dcab2e4
 +	return pipe;
 +}
 +
++/* Where a frame's time goes (V3), in TSC ticks: the front half's method handling (nv2a_pb_exec.c), the part of it in
++ * this backend's draws and vertices, and present's waits (the swapchain image and the frame slot's fence). */
++uint64_t jsrf_tsc_front;
++static uint64_t tsc_backend, tsc_wait;
++#define TSC_NOW() __builtin_ia32_rdtsc()
++
++/* Draws that sample a unit and get black in its place (V3): the handle given is gone, or none was given. */
++static uint64_t n_tex_gone, n_tex_none;
++
 +static VkDescriptorSet descriptor_set(void)
 +{
 +	Frame *f = &g_fr[g_slot];
 +	uint32_t tex[4];
-+	for (int u = 0; u < 4; u++)
++	const uint32_t sampled = prog_ok(g_cur_prog) ? g_prog[g_cur_prog - 1].samplers : 0;
++	for (int u = 0; u < 4; u++) {
 +		tex[u] = tex_ok(g_bound[u]) ? g_bound[u] : g_black;
++		if ((sampled >> u) & 1) {
++			if (g_bound[u] && !tex_ok(g_bound[u])) {
++				if (n_tex_gone++ < 8)
++					LOG("unit %d samples texture %u, which is gone: black instead\n", u, g_bound[u]);
++			} else if (!g_bound[u]) {
++				if (n_tex_none++ < 8)
++					LOG("unit %d is sampled with no texture bound: black instead\n", u);
++			}
++		}
++	}
 +	if (g_set && g_set_stamp == g_stamp && !memcmp(tex, g_set_tex, sizeof tex))
 +		return g_set;
 +	VkDescriptorSet set = VK_NULL_HANDLE;
@@ -2718,7 +2766,15 @@ index 0000000..dcab2e4
 +	return 1;
 +}
 +
++static void vk_draw_body(int prim, uint32_t count);
 +static void vk_draw(int prim, uint32_t count)
++{
++	uint64_t t0 = TSC_NOW();
++	vk_draw_body(prim, count);
++	tsc_backend += TSC_NOW() - t0;
++}
++
++static void vk_draw_body(int prim, uint32_t count)
 +{
 +	static int nocull = -1;
 +	if (nocull < 0) {
@@ -2866,7 +2922,9 @@ index 0000000..dcab2e4
 +	Frame *f = &g_fr[g_slot];
 +	uint32_t img = 0;
 +	pass_end();
++	uint64_t tw = TSC_NOW();
 +	VkResult r = vkAcquireNextImageKHR(g_dev, g_swap, UINT64_MAX, f->acquired, VK_NULL_HANDLE, &img);
++	tsc_wait += TSC_NOW() - tw;
 +	if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) {
 +		LOG("acquire failed (%d)\n", r);
 +		submit(VK_NULL_HANDLE, VK_NULL_HANDLE, 1);
@@ -2915,7 +2973,9 @@ index 0000000..dcab2e4
 +	}
 +	n_frames++;
 +	g_slot = (g_slot + 1) % FRAMES;
-+	frame_start();
++	tw = TSC_NOW();
++	frame_start(); /* waits for this slot's last frame */
++	tsc_wait += TSC_NOW() - tw;
 +}
 +
 +static void vk_report(void)
@@ -2926,6 +2986,30 @@ index 0000000..dcab2e4
 +	    (unsigned long long)n_progs, ms_progs, (unsigned long long)n_pipes, ms_pipes, (unsigned long long)n_tex,
 +	    tex_bytes / 1048576.0, (unsigned long long)n_snaps, (unsigned long long)n_reads,
 +	    (unsigned long long)n_flushes);
++	{
++		/* the TSC's rate from the clock, between two reports */
++		static uint64_t last_tsc, last_frames, last_front, last_backend, last_v, last_wait;
++		static double last_ms;
++		const uint64_t tsc = TSC_NOW();
++		const double ms = now_ms();
++		if (last_ms > 0.0 && n_frames > last_frames) {
++			const double per_ms = (double)(tsc - last_tsc) / (ms - last_ms), fr = (double)(n_frames - last_frames);
++			LOG("ms a frame: %.1f in all; front half %.1f (draws %.1f, vertices %.1f in this backend); present waits %.1f\n",
++			    (ms - last_ms) / fr, (double)(jsrf_tsc_front - last_front) / per_ms / fr,
++			    (double)(tsc_backend - last_backend) / per_ms / fr, (double)(tsc_backend_v - last_v) / per_ms / fr,
++			    (double)(tsc_wait - last_wait) / per_ms / fr);
++		}
++		last_tsc = tsc;
++		last_ms = ms;
++		last_frames = n_frames;
++		last_front = jsrf_tsc_front;
++		last_backend = tsc_backend;
++		last_v = tsc_backend_v;
++		last_wait = tsc_wait;
++	}
++	if (n_tex_gone || n_tex_none)
++		LOG("black in place of a texture: %llu draws whose texture was gone, %llu with none bound\n",
++		    (unsigned long long)n_tex_gone, (unsigned long long)n_tex_none);
 +}
 +
 +static double vk_pipeline_ms(void) { return ms_pipes; }
