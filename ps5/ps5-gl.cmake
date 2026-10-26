@@ -139,7 +139,7 @@ set(PS5_HEAP_WRAPS
     "-Wl,--wrap=opendir" "-Wl,--wrap=readdir" "-Wl,--wrap=closedir"
     # Diagnostics: the reason the process ended goes into jsrf.log as well.
     "-Wl,--wrap=sceKernelDebugOutText" "-Wl,--wrap=_Exit"
-    "-Wl,--wrap=abort" "-Wl,--wrap=__assert"
+    "-Wl,--wrap=abort" "-Wl,--wrap=clock_gettime" "-Wl,--wrap=__assert"
     # Every thread gets a stack that fits a shader compile; see ps5-posix.c.
     "-Wl,--wrap=pthread_create"
     # Kernel devices: /dev/crypto is refused, the rest is logged.

@@ -1151,3 +1151,47 @@ void jsrf_prof_set(int on)
 		fprintf(stderr, "jsrf: thread profiler %s\n", on ? "on" : "off");
 	g_prof_on = on;
 }
+
+
+/* --- A cheap monotonic clock (decision log D49) ---------------------------
+
+   clock_gettime is a system call here, and a costly one: the thread profile
+   (D45) put the game thread's and the render thread's biggest single spot in
+   it -- GetTickCount64, the renderer's per-draw and per-texture timing, the
+   ack thread's loop. CLOCK_MONOTONIC is answered from the processor's time
+   stamp counter instead, at the rate the system gives for it, from a base
+   taken from the real clock at start-up: a few nanoseconds rather than a
+   call into the kernel. Every other clock goes to the system as before. */
+#include <time.h>
+
+int __real_clock_gettime(clockid_t clock, struct timespec* ts);
+uint64_t sceKernelGetTscFrequency(void);
+
+extern int ps5_log_ready; /* ps5-support.c */
+static uint64_t s_tsc_hz, s_tsc_base;
+static uint64_t s_ns_base;
+
+__attribute__((constructor(103)))
+static void tsc_clock_init(void)
+{
+	struct timespec now;
+	const uint64_t hz = sceKernelGetTscFrequency();
+	if (hz < 1000000u || __real_clock_gettime(CLOCK_MONOTONIC, &now) != 0) return;
+	s_tsc_base = __builtin_ia32_rdtsc();
+	s_ns_base = (uint64_t)now.tv_sec * 1000000000u + (uint64_t)now.tv_nsec;
+	s_tsc_hz = hz;
+	if (ps5_log_ready)
+		fprintf(stderr, "jsrf: CLOCK_MONOTONIC from the TSC at %llu Hz\n", (unsigned long long)hz);
+}
+
+int __wrap_clock_gettime(clockid_t clock, struct timespec* ts)
+{
+	const uint64_t hz = s_tsc_hz;
+	if (clock != CLOCK_MONOTONIC || ts == NULL || hz == 0)
+		return __real_clock_gettime(clock, ts);
+	const uint64_t d = __builtin_ia32_rdtsc() - s_tsc_base;
+	const uint64_t ns = s_ns_base + (d / hz) * 1000000000u + (d % hz) * 1000000000u / hz;
+	ts->tv_sec = (time_t)(ns / 1000000000u);
+	ts->tv_nsec = (long)(ns % 1000000000u);
+	return 0;
+}

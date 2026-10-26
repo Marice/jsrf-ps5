@@ -40,7 +40,7 @@ set(PS5_WRAPS
     "-Wl,--wrap=pathconf" "-Wl,--wrap=system"
     "-Wl,--wrap=opendir" "-Wl,--wrap=readdir" "-Wl,--wrap=closedir"
     "-Wl,--wrap=sceKernelDebugOutText" "-Wl,--wrap=_Exit"
-    "-Wl,--wrap=abort" "-Wl,--wrap=__assert"
+    "-Wl,--wrap=abort" "-Wl,--wrap=clock_gettime" "-Wl,--wrap=__assert"
     "-Wl,--wrap=open" "-Wl,--wrap=_open" "-Wl,--wrap=ioctl"
     "-Wl,--wrap=printf" "-Wl,--wrap=vprintf" "-Wl,--wrap=puts"
     "-Wl,--wrap=putchar"
