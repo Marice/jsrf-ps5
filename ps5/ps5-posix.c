@@ -771,6 +771,11 @@ static void* thread_trampoline(void* opaque)
 	        launch.number, launch.stack / 1024, (void*)&here);
 	spread_over_cores(launch.number);
 	jsrf_prof_register(launch.number); /* the profiler's (D45) */
+	{
+		/* this thread's control block may be a dead thread's: forget its register block (D51) */
+		extern void recomp_regfile_forget(void);
+		recomp_regfile_forget();
+	}
 	return launch.start(launch.arg);
 }
 
