@@ -581,10 +581,25 @@ index 9957219..5428745 100644
  static void xbox_cs_note_owner(CRITICAL_SECTION* cs)
  {
 diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
-index 2381627..9a46a58 100644
+index 2381627..a880912 100644
 --- a/src/kernel/nv2a_pb_exec.c
 +++ b/src/kernel/nv2a_pb_exec.c
-@@ -1957,3 +1957,45 @@ void nv2a_pb_exec_report(void)
+@@ -1455,6 +1455,14 @@ static unsigned long g_swm_count[17];
+ 
+ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+ {
++#if defined(JSRF_PS5)
++    /* the flush kick acknowledged between rounds too (D52) */
++    {
++        static unsigned n;
++        extern void xbox_nv2a_flush_ack(void);
++        if ((++n & 255u) == 0) xbox_nv2a_flush_ack();
++    }
++#endif
+     if (method == 0x0100 && param) {
+         extern void xbox_nv2a_software_method(uint32_t subch, uint32_t param);
+         g_swm_count[param < 16 ? param : 16]++;
+@@ -1957,3 +1965,45 @@ void nv2a_pb_exec_report(void)
      }
      }    fflush(stderr);
  }
@@ -730,7 +745,7 @@ index f3668a7..05b3dc5 100644
  
  #define FPS_MAX 512
 diff --git a/src/kernel/xbox_memory_layout.c b/src/kernel/xbox_memory_layout.c
-index 99d17e7..d0b0d5c 100644
+index 99d17e7..ae0bbe4 100644
 --- a/src/kernel/xbox_memory_layout.c
 +++ b/src/kernel/xbox_memory_layout.c
 @@ -214,6 +214,27 @@ static void nv2a_kick_signal(void)
@@ -769,15 +784,40 @@ index 99d17e7..d0b0d5c 100644
  void xbox_nv2a_kick(void)
  {
      if (s_kick_on < 0) { const char *e = getenv("RECOMP_NV2A_KICK"); s_kick_on = e ? atoi(e) : 1; }
-@@ -682,6 +704,7 @@ static void framebuffer_probe_tick(void)
+@@ -682,6 +704,32 @@ static void framebuffer_probe_tick(void)
   * is not -- and the acknowledgement de-asserts PMC_INTR_0's PCRTC bit, which
   * is what the handler's own spin loop is waiting for.
   */
 +
++#if defined(JSRF_PS5)
++/*
++ * The framebuffer flush kick acknowledged from inside the walk (jsrf-ps5
++ * D52). The title's KickOff (sub_001912A0) sets bit 16 at 0x100410, spins
++ * until it clears, and only then moves DMA_PUT on; the ack thread cleared it
++ * once a round, after the whole walk, so every submission waited for every
++ * earlier one to be drawn and the game and the renderer took turns. On the
++ * console a flush completes promptly. D47 did this once before and broke the
++ * title screen, because GET then jumped to PUT ahead of the walk; with GET
++ * now following the walk (D52), the title waits for space exactly as long
++ * as the commands in it are unread. Only the flush kick: the interrupt
++ * status registers stay with the round (D48).
++ */
++static volatile uint32_t *s_ack_regs;
++
++void xbox_nv2a_flush_ack(void)
++{
++    volatile uint32_t *regs = s_ack_regs;
++    if (!regs) return;
++    volatile uint32_t *r = (volatile uint32_t *)((char *)regs + 0x100410);
++    if (*r & 0x00010000u)
++        *r &= ~0x00010000u;
++}
++#endif
++
  static void vblank_intr_tick(volatile uint32_t *regs)
  {
      volatile uint32_t *pcrtc = (volatile uint32_t *)((char *)regs + 0x600100);
-@@ -718,10 +741,131 @@ void xbox_nv2a_vblank_service(void)
+@@ -718,10 +766,132 @@ void xbox_nv2a_vblank_service(void)
      if (g_nv2a_memory) vblank_intr_tick((volatile uint32_t *)g_nv2a_memory);
  }
  
@@ -888,6 +928,7 @@ index 99d17e7..d0b0d5c 100644
 +        extern void jsrf_ps5_render_thread(void);
 +        jsrf_ps5_render_thread();
 +    }
++    s_ack_regs = regs;   /* xbox_nv2a_flush_ack (D52) */
 +#endif
      while (!InterlockedCompareExchange(&g_nv2a_ack_stop, 0, 0)) {
 +#if defined(JSRF_PS5)
@@ -909,7 +950,26 @@ index 99d17e7..d0b0d5c 100644
          vblank_intr_tick(regs);
          for (size_t i = 0; i < sizeof(NV2A_ACK) / sizeof(NV2A_ACK[0]); i++) {
              volatile uint32_t *r =
-@@ -755,6 +899,9 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -747,7 +917,17 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+                 (volatile uint32_t *)((char *)regs + NV2A_USER_DMA_PUT);
+             volatile uint32_t *get =
+                 (volatile uint32_t *)((char *)regs + NV2A_USER_DMA_GET);
+-            if (*get != *put) {
++#if defined(JSRF_PS5)
++            /* With the walk on, GET moves only once the walk has read up to
++             * PUT (below, after it): set here, ahead of the walk, it told
++             * the title its commands were read before they were, and a title
++             * that reuses pushbuffer space as GET passes could overwrite
++             * commands not yet walked (jsrf-ps5 D52). */
++            if (!s_nv2a_trace && *get != *put)
++#else
++            if (*get != *put)
++#endif
++            {
+                 *get = *put;
+             }
+         }
+@@ -755,6 +935,9 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
          counter_mirrors_tick();
          frame_counters_tick();
          framebuffer_probe_tick();
@@ -919,7 +979,7 @@ index 99d17e7..d0b0d5c 100644
  
          /* Which framebuffer the display would be scanning out.
           *
-@@ -793,9 +940,17 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -793,9 +976,17 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
                       * The contiguous window IS the physical-address view, so
                       * OR-ing its base is the documented round trip, not a
                       * guess. */
@@ -938,7 +998,7 @@ index 99d17e7..d0b0d5c 100644
                      } else if (last_put && put < last_put) {
                          /* The ring wrapped: PUT went back to its start.
                           * The tail from the old PUT to the jump used to be
-@@ -805,10 +960,37 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -805,10 +996,37 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
                           * then from the jump's target to the new PUT. */
                          uint32_t from = XBOX_CONTIG_BASE | (last_put & 0x0FFFFFFFu);
                          uint32_t to   = XBOX_CONTIG_BASE | (put      & 0x0FFFFFFFu);
@@ -978,7 +1038,18 @@ index 99d17e7..d0b0d5c 100644
                          }
                      }
                      /* Periodic, because what the title submits at init is not
-@@ -878,6 +1060,9 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -821,6 +1039,10 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+                     }
+                 }
+                 last_put = put; last_put_ms = now_ms;
++#if defined(JSRF_PS5)
++                /* read up to here: now the title may reuse it (D52) */
++                *(volatile uint32_t *)((char *)regs + NV2A_USER_DMA_GET) = put;
++#endif
+                 /* GET as well as PUT. A title that stops submitting has either
+                  * finished or is spinning on the GPU catching up, and only GET
+                  * tells those apart -- D3D waits for GET to reach PUT before it
+@@ -878,6 +1100,9 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
          *(volatile uint32_t *)((uintptr_t)(XBOX_KERNEL_DATA_BASE + KDATA_TICK_COUNT)
                                 + g_memory_offset) = GetTickCount();
  
@@ -988,7 +1059,7 @@ index 99d17e7..d0b0d5c 100644
          /* Yield -- or actually sleep, on a host with fewer cores than the
           * runtime has busy threads. RECOMP_ACK_SLEEP_US=<n> (default 200 on
           * POSIX) keeps this thread from eating a whole core; the pushbuffer
-@@ -905,6 +1090,9 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -905,6 +1130,9 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
              else Sleep(0);
  #endif
          }
@@ -998,7 +1069,7 @@ index 99d17e7..d0b0d5c 100644
      }
      return 0;
  }
-@@ -951,7 +1139,97 @@ uint32_t g_xbox_code_hi = 0;
+@@ -951,7 +1179,97 @@ uint32_t g_xbox_code_hi = 0;
  /* Global registers for recompiled code (via recomp_types.h) */
  /* Each guest thread's TIB. The first thread uses the one the loader built;
   * a spawned thread gets its own from xbox_AllocThreadTib(). */
@@ -1096,7 +1167,7 @@ index 99d17e7..d0b0d5c 100644
  
  /* The shape of the TLS block the loader built, so a new thread can be
   * given one just like it: where the initialised image data starts, how
-@@ -959,8 +1237,12 @@ RECOMP_TLS uint32_t g_fs_base = XBOX_TIB_MAIN;
+@@ -959,8 +1277,12 @@ RECOMP_TLS uint32_t g_fs_base = XBOX_TIB_MAIN;
   * at is. Zero total means the image had no TLS directory. */
  static uint32_t g_tls_template_va, g_tls_total, g_tls_thread_size = 64;
  
@@ -1109,7 +1180,7 @@ index 99d17e7..d0b0d5c 100644
  
  #ifdef RECOMP_ABI_CHECK
  /* Report a lifted function that returned without restoring ebx/esi/edi.
-@@ -1105,19 +1387,37 @@ void recomp_abi_violation_log(uint32_t va, uint32_t ebx0, uint32_t esi0,
+@@ -1105,19 +1427,37 @@ void recomp_abi_violation_log(uint32_t va, uint32_t ebx0, uint32_t esi0,
  #endif
  
  /* SEH frame pointer bridge (see recomp_types.h for explanation) */
@@ -1147,7 +1218,7 @@ index 99d17e7..d0b0d5c 100644
  
  /* ---- non-local jumps ---------------------------------------------------
   *
-@@ -1136,7 +1436,11 @@ typedef struct {
+@@ -1136,7 +1476,11 @@ typedef struct {
  } recomp_jmp_slot;
  
  static RECOMP_TLS recomp_jmp_slot s_jmp[RECOMP_JMPBUF_SLOTS];
@@ -1159,7 +1230,7 @@ index 99d17e7..d0b0d5c 100644
  
  jmp_buf *recomp_setjmp_slot(uint32_t buf_va)
  {
-@@ -1301,13 +1605,23 @@ void xbox_WatchdogStart(void)
+@@ -1301,13 +1645,23 @@ void xbox_WatchdogStart(void)
  }
  
  /* SSE. 128 bits of architectural state, per-thread like the rest. */
@@ -1183,7 +1254,7 @@ index 99d17e7..d0b0d5c 100644
  
  /* EFLAGS.DF. Zero means the string instructions walk forwards, which is the
   * ABI's resting state and what almost every one of them does -- so this is
-@@ -1316,10 +1630,14 @@ RECOMP_TLS uint32_t g_ebp = 0;
+@@ -1316,10 +1670,14 @@ RECOMP_TLS uint32_t g_ebp = 0;
   * `std; repne scasb`, and memmove goes backwards when its regions overlap the
   * wrong way. Thread-local, because `std` and the `cld` that undoes it can land
   * in different lifted bodies of the same guest routine. */
@@ -1198,7 +1269,7 @@ index 99d17e7..d0b0d5c 100644
  
  /* ICALL trace ring buffer */
  volatile uint32_t g_icall_trace[16] = {0};
-@@ -1431,7 +1749,20 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -1431,7 +1789,20 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
           */
  #if !defined(_WIN32)
          {
