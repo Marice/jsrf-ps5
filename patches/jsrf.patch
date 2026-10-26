@@ -1154,10 +1154,10 @@ index 20c9273..1f32680 100644
              g_is_gl = 0;
 diff --git a/src/nv2a_vk/nv2a_vk.c b/src/nv2a_vk/nv2a_vk.c
 new file mode 100644
-index 0000000..ef606fd
+index 0000000..45d1831
 --- /dev/null
 +++ b/src/nv2a_vk/nv2a_vk.c
-@@ -0,0 +1,3287 @@
+@@ -0,0 +1,3292 @@
 +/*
 + * The NV2A renderer's device on Vulkan (nv2a_backend.h): the third backend,
 + * beside OpenGL (nv2a_gl/nv2a_gfx_gl.c) and Metal (nv2a_metal/nv2a_metal.m).
@@ -4276,9 +4276,14 @@ index 0000000..ef606fd
 +			uint32_t i;
 +			for (i = 0; i < nrt && rt_from[i] != a; i++)
 +				;
-+			snprintf(name, sizeof name, "/app0/vkcap/rf%d.bmp", n);
-+			if (i < nrt && rt_to[i])
-+				replay_bmp(name, rt_to[i], 0);
++			/* every target as it stands: this title draws a frame into one and copies it to the shown one at the
++			 * start of the next, so the presented target still holds the frame before */
++			(void)i;
++			for (uint32_t k = 0; k < nrt; k++)
++				if (rt_to[k]) {
++					snprintf(name, sizeof name, "/app0/vkcap/rf%d_rt%u.bmp", n, rt_from[k]);
++					replay_bmp(name, rt_to[k], 0);
++				}
 +		}
 +	}
 +	LOG("replay frame %d: %u draws, %u failed, %u targets, %u textures, %u programs\n", n, draws, failed, nrt, ntex,
