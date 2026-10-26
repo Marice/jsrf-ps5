@@ -208,7 +208,7 @@ index 2b3b3f4..e91438d 100644
      # needed (and on an iPhone or an Android phone not there).
      target_link_libraries(xbox_kernel PUBLIC platform xbox_nv2a_gl)
 diff --git a/src/kernel/kernel_bridge.c b/src/kernel/kernel_bridge.c
-index 331d6fe..4774156 100644
+index 331d6fe..9a326ba 100644
 --- a/src/kernel/kernel_bridge.c
 +++ b/src/kernel/kernel_bridge.c
 @@ -54,10 +54,16 @@ uint32_t xbox_GetConnectedInterrupt(uint32_t vector);
@@ -228,7 +228,51 @@ index 331d6fe..4774156 100644
  extern ptrdiff_t g_xbox_mem_offset;
  
  /* Dispatch table lookup (for function pointer args) */
-@@ -2919,6 +2925,17 @@ static XboxTimer g_timers[XBOX_MAX_TIMERS];
+@@ -383,7 +389,9 @@ static long kernel_log_budget(void)
+ #define STACK_ARG(n) ((uint32_t)BRIDGE_MEM32(g_esp + (n) * 4))
+ 
+ /* Guest return address of the call currently in a bridge. */
++#if !defined(RECOMP_REGFILE)
+ RECOMP_TLS uint32_t g_xbox_kernel_caller;
++#endif
+ 
+ /* ── Per-ordinal bridge functions ─────────────────────────
+  *
+@@ -423,13 +431,21 @@ static int g_thread_call_count = 0;
+  * two Xbox start-context arguments plus the dummy return address the callee's
+  * `ret` consumes, and runs. */
+ /* Set on threads this bridge spawned; see PsTerminateSystemThread. */
++#if defined(RECOMP_REGFILE) /* the PS5: platform/recomp_regfile.h, D50 */
++#define g_is_spawned_thread (recomp_regfile()->r_is_spawned)
++#else
+ static RECOMP_TLS int g_is_spawned_thread = 0;
++#endif
+ 
+ /* This thread's simulated stack, so both exits can give it back. Thread-local
+  * for the obvious reason, and needed at all because the common exit is
+  * ExitThread from PsTerminateSystemThread -- bridge_thread_main's own return
+  * path is the rare one. */
++#if defined(RECOMP_REGFILE) /* the PS5: platform/recomp_regfile.h, D50 */
++#define g_thread_stack_top (recomp_regfile()->r_thread_stack_top)
++#else
+ static RECOMP_TLS uint32_t g_thread_stack_top = 0;
++#endif
+ uint32_t xbox_current_thread_stack_top(void) { return g_thread_stack_top; }
+ 
+ struct bridge_thread_start {
+@@ -2137,7 +2153,11 @@ static int kernel_run_dpc_locked(uint32_t dpc_va, uint32_t arg1, uint32_t arg2);
+ /* An interrupt, DPC or synchronize routine is running on this thread. The
+  * console switches no threads until it returns, so neither does the guest
+  * lock's time slice (xbox_guest_lock_yield_now). */
++#if defined(RECOMP_REGFILE) /* the PS5: platform/recomp_regfile.h, D50 */
++#define t_in_callback (recomp_regfile()->r_in_callback)
++#else
+ static RECOMP_TLS int t_in_callback;
++#endif
+ static int kernel_run_dpc(uint32_t dpc_va, uint32_t arg1, uint32_t arg2)
+ {
+     int r;
+@@ -2919,6 +2939,17 @@ static XboxTimer g_timers[XBOX_MAX_TIMERS];
  static CRITICAL_SECTION g_timer_lock;
  static int g_timer_started;
  
@@ -246,7 +290,7 @@ index 331d6fe..4774156 100644
  static DWORD WINAPI kernel_timer_thread(LPVOID unused)
  {
      int slot = xbox_worker_stack_alloc();
-@@ -2946,11 +2963,40 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
+@@ -2946,11 +2977,40 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
          g_fs_base = tib;
      }
  
@@ -287,7 +331,7 @@ index 331d6fe..4774156 100644
          /*
           * RECOMP_TABLE_WATCH=<addr>,<bytes>,<stride>: catch a pointer table
           * going bad at the moment it goes bad.
-@@ -3018,12 +3064,19 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
+@@ -3018,12 +3078,19 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
                  prev_valid = 1;
              }
          }
@@ -307,7 +351,7 @@ index 331d6fe..4774156 100644
          now = (long long)GetTickCount64();
  
          for (i = 0; i < XBOX_MAX_TIMERS; i++) {
-@@ -3047,6 +3100,7 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
+@@ -3047,6 +3114,7 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
              if (dpc)
                  kernel_run_dpc(dpc, 0, 0);
          }
@@ -315,7 +359,32 @@ index 331d6fe..4774156 100644
      }
  }
  
-@@ -6169,6 +6223,32 @@ static RECOMP_TLS int g_kernel_dispatch_slot = -1;
+@@ -3638,7 +3706,12 @@ static void deliver_one_apc(uint32_t apc_routine, uint32_t apc_context,
+  * now. RECOMP_APC_INLINE=1 restores the old behaviour. */
+ #define BRIDGE_APC_RING 32
+ static RECOMP_TLS struct { uint32_t routine, context, iostatus; } t_apc_ring[BRIDGE_APC_RING];
++#if defined(RECOMP_REGFILE) /* the PS5: platform/recomp_regfile.h, D50 */
++#define t_apc_head (recomp_regfile()->r_apc_head)
++#define t_apc_count (recomp_regfile()->r_apc_count)
++#else
+ static RECOMP_TLS int t_apc_head, t_apc_count;
++#endif
+ 
+ static void bridge_queue_apc(uint32_t apc_routine, uint32_t apc_context, uint32_t iostatus)
+ {
+@@ -6149,7 +6222,11 @@ static void kernel_watch_arm_once(void)
+  * SetThreadPriority arriving as NtSuspendThread(NULL), and GetThreadPriority
+  * returning with esp 4 high and esi zeroed -- which took CRI's file handle
+  * out of its register and stopped the music stream. */
++#if defined(RECOMP_REGFILE) /* the PS5: platform/recomp_regfile.h, D50 */
++#define g_kernel_dispatch_slot (recomp_regfile()->r_dispatch_slot)
++#else
+ static RECOMP_TLS int g_kernel_dispatch_slot = -1;
++#endif
+ 
+ /* ── Guest scheduler lock: one guest thread runs at a time ──────────────
+  *
+@@ -6169,6 +6246,32 @@ static RECOMP_TLS int g_kernel_dispatch_slot = -1;
   *
   * RECOMP_GUEST_LOCK=0 disables it. */
  static CRITICAL_SECTION g_guest_lock;
@@ -348,7 +417,7 @@ index 331d6fe..4774156 100644
  static volatile unsigned long g_lock_owner;   /* see xbox_guest_lock_report */
  #ifdef __APPLE__
  #include <pthread.h>
-@@ -6258,6 +6338,33 @@ int32_t g_xbox_guest_cpu_preempt;
+@@ -6258,6 +6361,33 @@ int32_t g_xbox_guest_cpu_preempt;
  /* The holder's latest loop back edge and its IRQL there, for the [LOCK]
   * report. */
  static volatile uint32_t g_lock_owner_edge;
@@ -382,6 +451,62 @@ index 331d6fe..4774156 100644
  static volatile unsigned g_lock_owner_irql;
  /* Interrupts delivered from inside a spin rather than on the timer thread. */
  static unsigned long g_spin_isrs;
+@@ -6284,7 +6414,11 @@ static long long     g_lock_wait_ms[LOCK_SLOTS];
+ static long long     g_lock_hold_ms[LOCK_SLOTS];
+ static unsigned long g_lock_takes[LOCK_SLOTS];
+ static unsigned long g_lock_tid[LOCK_SLOTS];
++#if defined(RECOMP_REGFILE) /* the PS5: platform/recomp_regfile.h, D50 */
++#define t_lock_slot (recomp_regfile()->r_lock_slot)
++#else
+ static RECOMP_TLS int t_lock_slot = -1;
++#endif
+ static int lock_watch(void)
+ {
+     static int on = -1;
+@@ -6313,9 +6447,15 @@ int xbox_guest_lock_idle_takes_lock(void)
+     if (v < 0) v = getenv("RECOMP_LOCK_IDLE") ? 1 : 0;
+     return v;
+ }
++#if defined(RECOMP_REGFILE) /* the PS5: platform/recomp_regfile.h, D50 */
++#define t_guest_holds (recomp_regfile()->r_guest_holds)
++#define t_guest_idle (recomp_regfile()->r_guest_idle)
++#define t_guest_since (recomp_regfile()->r_guest_since)
++#else
+ static RECOMP_TLS int t_guest_holds;
+ static RECOMP_TLS int t_guest_idle;
+ static RECOMP_TLS long long t_guest_since;
++#endif
+ 
+ static int guest_lock_on(void)
+ {
+@@ -7241,7 +7381,11 @@ typedef struct {
+ } KThreadState;
+ static KThreadState g_kthreads[KTHREAD_SLOTS];
+ static volatile long g_kthread_n;
++#if defined(RECOMP_REGFILE) /* the PS5: platform/recomp_regfile.h, D50 */
++#define t_kthread (*(KThreadState **)&recomp_regfile()->r_kthread)
++#else
+ static RECOMP_TLS KThreadState *t_kthread;
++#endif
+ 
+ static uint32_t gcs_caller(void)
+ {
+diff --git a/src/kernel/kernel_hal.c b/src/kernel/kernel_hal.c
+index 86ab3dd..0bb28e7 100644
+--- a/src/kernel/kernel_hal.c
++++ b/src/kernel/kernel_hal.c
+@@ -31,7 +31,11 @@
+  * allows code that checks IRQL to function correctly.
+  * ============================================================================ */
+ 
++#if defined(RECOMP_REGFILE) /* the PS5: platform/recomp_regfile.h, D50 */
++#define g_current_irql (*(KIRQL *)&recomp_regfile()->r_irql)
++#else
+ static XBOX_THREAD_LOCAL KIRQL g_current_irql = PASSIVE_LEVEL;
++#endif
+ 
+ /* What this thread's IRQL is, for code outside this file.
+  *
 diff --git a/src/kernel/kernel_path.c b/src/kernel/kernel_path.c
 index 8ec1ea0..2282acd 100644
 --- a/src/kernel/kernel_path.c
@@ -432,7 +557,7 @@ index 8ec1ea0..2282acd 100644
          }
          if (!slash) return;
 diff --git a/src/kernel/kernel_rtl.c b/src/kernel/kernel_rtl.c
-index 9957219..6d37674 100644
+index 9957219..5428745 100644
 --- a/src/kernel/kernel_rtl.c
 +++ b/src/kernel/kernel_rtl.c
 @@ -318,7 +318,9 @@ static CRITICAL_SECTION* xbox_cs_shadow(PRTL_CRITICAL_SECTION guest)
@@ -445,6 +570,16 @@ index 9957219..6d37674 100644
  extern uint32_t g_xbox_code_lo, g_xbox_code_hi;
  
  /* A guest backtrace, printed where the guest is standing.
+@@ -447,7 +449,9 @@ static void crt_lock_trace(const char *what, PRTL_CRITICAL_SECTION guest)
+     fflush(stderr);
+ }
+ 
++#if !defined(RECOMP_REGFILE)
+ extern RECOMP_TLS uint32_t g_xbox_kernel_caller;
++#endif
+ 
+ static void xbox_cs_note_owner(CRITICAL_SECTION* cs)
+ {
 diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
 index 2381627..9a46a58 100644
 --- a/src/kernel/nv2a_pb_exec.c
@@ -595,7 +730,7 @@ index f3668a7..05b3dc5 100644
  
  #define FPS_MAX 512
 diff --git a/src/kernel/xbox_memory_layout.c b/src/kernel/xbox_memory_layout.c
-index 99d17e7..d24e28e 100644
+index 99d17e7..535298e 100644
 --- a/src/kernel/xbox_memory_layout.c
 +++ b/src/kernel/xbox_memory_layout.c
 @@ -214,6 +214,27 @@ static void nv2a_kick_signal(void)
@@ -863,7 +998,7 @@ index 99d17e7..d24e28e 100644
      }
      return 0;
  }
-@@ -951,7 +1139,26 @@ uint32_t g_xbox_code_hi = 0;
+@@ -951,7 +1139,28 @@ uint32_t g_xbox_code_hi = 0;
  /* Global registers for recompiled code (via recomp_types.h) */
  /* Each guest thread's TIB. The first thread uses the one the loader built;
   * a spawned thread gets its own from xbox_AllocThreadTib(). */
@@ -880,6 +1015,8 @@ index 99d17e7..d24e28e 100644
 +    .r_mxcsr = 0x1F80u,
 +    .r_fp_control_word = 0x037Fu,
 +    .r_fp_cc = 0x4000,
++    .r_lock_slot = -1,
++    .r_dispatch_slot = -1,
 +};
 +
 +RecompRegFile *recomp_regfile(void)
@@ -890,7 +1027,7 @@ index 99d17e7..d24e28e 100644
  
  /* The shape of the TLS block the loader built, so a new thread can be
   * given one just like it: where the initialised image data starts, how
-@@ -959,8 +1166,12 @@ RECOMP_TLS uint32_t g_fs_base = XBOX_TIB_MAIN;
+@@ -959,8 +1168,12 @@ RECOMP_TLS uint32_t g_fs_base = XBOX_TIB_MAIN;
   * at is. Zero total means the image had no TLS directory. */
  static uint32_t g_tls_template_va, g_tls_total, g_tls_thread_size = 64;
  
@@ -903,7 +1040,7 @@ index 99d17e7..d24e28e 100644
  
  #ifdef RECOMP_ABI_CHECK
  /* Report a lifted function that returned without restoring ebx/esi/edi.
-@@ -1105,19 +1316,37 @@ void recomp_abi_violation_log(uint32_t va, uint32_t ebx0, uint32_t esi0,
+@@ -1105,19 +1318,37 @@ void recomp_abi_violation_log(uint32_t va, uint32_t ebx0, uint32_t esi0,
  #endif
  
  /* SEH frame pointer bridge (see recomp_types.h for explanation) */
@@ -941,7 +1078,19 @@ index 99d17e7..d24e28e 100644
  
  /* ---- non-local jumps ---------------------------------------------------
   *
-@@ -1301,13 +1530,23 @@ void xbox_WatchdogStart(void)
+@@ -1136,7 +1367,11 @@ typedef struct {
+ } recomp_jmp_slot;
+ 
+ static RECOMP_TLS recomp_jmp_slot s_jmp[RECOMP_JMPBUF_SLOTS];
++#if defined(RECOMP_REGFILE) /* the PS5: platform/recomp_regfile.h, D50 */
++#define s_jmp_used (recomp_regfile()->r_jmp_used)
++#else
+ static RECOMP_TLS int             s_jmp_used;
++#endif
+ 
+ jmp_buf *recomp_setjmp_slot(uint32_t buf_va)
+ {
+@@ -1301,13 +1536,23 @@ void xbox_WatchdogStart(void)
  }
  
  /* SSE. 128 bits of architectural state, per-thread like the rest. */
@@ -965,7 +1114,7 @@ index 99d17e7..d24e28e 100644
  
  /* EFLAGS.DF. Zero means the string instructions walk forwards, which is the
   * ABI's resting state and what almost every one of them does -- so this is
-@@ -1316,10 +1555,14 @@ RECOMP_TLS uint32_t g_ebp = 0;
+@@ -1316,10 +1561,14 @@ RECOMP_TLS uint32_t g_ebp = 0;
   * `std; repne scasb`, and memmove goes backwards when its regions overlap the
   * wrong way. Thread-local, because `std` and the `cld` that undoes it can land
   * in different lifted bodies of the same guest routine. */
@@ -980,7 +1129,7 @@ index 99d17e7..d24e28e 100644
  
  /* ICALL trace ring buffer */
  volatile uint32_t g_icall_trace[16] = {0};
-@@ -1431,7 +1674,20 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -1431,7 +1680,20 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
           */
  #if !defined(_WIN32)
          {
@@ -4765,10 +4914,10 @@ index 0000000..d24e6ea
 +const Nv2aGfx *nv2a_gfx_vk(void) { return &g_vk; }
 diff --git a/src/platform/recomp_regfile.h b/src/platform/recomp_regfile.h
 new file mode 100644
-index 0000000..06aeb51
+index 0000000..e5cf3b7
 --- /dev/null
 +++ b/src/platform/recomp_regfile.h
-@@ -0,0 +1,106 @@
+@@ -0,0 +1,117 @@
 +/*
 + * recomp_regfile.h - the guest's registers in one thread-local block, on the
 + * PlayStation 5 (jsrf-ps5 decision log D46, after PS5_Burnout3's).
@@ -4831,6 +4980,16 @@ index 0000000..06aeb51
 +    double r_fp_stack[8];
 +    RecompXmm r_xmm[8];
 +    RecompMmx r_mm[8];
++    /* The runtime's own per-thread state that the lifted code reaches on
++     * every loop back edge (xbox_GuestCpuPreempt) and kernel call: the guest
++     * lock's bookkeeping, IRQL, the kernel dispatch, the last error (D50).
++     * Each file names its own fields; pointers are kept as void *. */
++    uint32_t r_kernel_caller, r_thread_stack_top, r_last_error, r_tid;
++    int r_guest_holds, r_guest_idle, r_lock_slot, r_dispatch_slot, r_in_callback;
++    int r_is_spawned, r_apc_head, r_apc_count, r_jmp_used;
++    long long r_guest_since;
++    void *r_self_obj, *r_kthread;
++    uint8_t r_irql;
 +} RecompRegFile;
 +
 +#ifdef __cplusplus
@@ -4872,11 +5031,12 @@ index 0000000..06aeb51
 +#define g_mm5             (recomp_regfile()->r_mm[5])
 +#define g_mm6             (recomp_regfile()->r_mm[6])
 +#define g_mm7             (recomp_regfile()->r_mm[7])
++#define g_xbox_kernel_caller (recomp_regfile()->r_kernel_caller)
 +#endif /* JSRF_PS5 */
 +
 +#endif /* RECOMP_REGFILE_H */
 diff --git a/src/platform/win32_compat.c b/src/platform/win32_compat.c
-index bb4f68d..53423e5 100644
+index bb4f68d..67b808f 100644
 --- a/src/platform/win32_compat.c
 +++ b/src/platform/win32_compat.c
 @@ -36,6 +36,18 @@
@@ -4898,7 +5058,19 @@ index bb4f68d..53423e5 100644
  #else
  #include <sys/sysinfo.h>
  #if defined(__ANDROID__)
-@@ -268,6 +280,9 @@ typedef struct w32_object {
+@@ -47,7 +59,11 @@
+ /* Last-error (thread-local)                                             */
+ /* ===================================================================== */
+ 
++#if defined(RECOMP_REGFILE) /* the PS5: platform/recomp_regfile.h, D50 */
++#define t_last_error (recomp_regfile()->r_last_error)
++#else
+ static __thread DWORD t_last_error = 0;
++#endif
+ 
+ DWORD GetLastError(void)            { return t_last_error; }
+ VOID  SetLastError(DWORD code)      { t_last_error = code; }
+@@ -268,6 +284,9 @@ typedef struct w32_object {
      int             fd;
      SIZE_T          map_size;
      char           *file_path;
@@ -4908,7 +5080,21 @@ index bb4f68d..53423e5 100644
  } w32_object;
  
  /* pseudo handles for "current thread"/"current process" */
-@@ -1450,9 +1465,15 @@ void *win32_reserve_address_space(void *base, size_t size)
+@@ -275,8 +294,13 @@ typedef struct w32_object {
+ #define PSEUDO_CURRENT_THREAD  ((HANDLE)(LONG_PTR)-2)
+ #define STILL_ACTIVE 259u
+ 
++#if defined(RECOMP_REGFILE) /* the PS5: platform/recomp_regfile.h, D50 */
++#define t_self_obj (*(w32_object **)&recomp_regfile()->r_self_obj)
++#define t_tid (recomp_regfile()->r_tid)
++#else
+ static __thread w32_object *t_self_obj = NULL;
+ static __thread DWORD       t_tid      = 0;
++#endif
+ static volatile LONG        s_next_tid = 1000;
+ 
+ DWORD GetCurrentThreadId(void)
+@@ -1450,9 +1474,15 @@ void *win32_reserve_address_space(void *base, size_t size)
  {
      void *p;
      if (g_reserved_n >= W32_MAX_RESERVATIONS) return NULL;
@@ -4924,7 +5110,7 @@ index bb4f68d..53423e5 100644
      if (base && p != base) { munmap(p, size); return NULL; }
      g_reserved[g_reserved_n].base = p;
      g_reserved[g_reserved_n].size = size;
-@@ -1517,11 +1538,137 @@ static int protect_within_host_pages(void *addr, size_t size, int prot)
+@@ -1517,11 +1547,137 @@ static int protect_within_host_pages(void *addr, size_t size, int prot)
      return mprotect((void *)lo, (size_t)(hi - lo), prot);
  }
  
@@ -5062,7 +5248,7 @@ index bb4f68d..53423e5 100644
      /* MEM_COMMIT on a region already reserved by a prior VirtualAlloc:
       * just adjust protection. */
      if ((allocationType & MEM_COMMIT) && !(allocationType & MEM_RESERVE) && address) {
-@@ -1537,6 +1684,16 @@ LPVOID VirtualAlloc(LPVOID address, SIZE_T size, DWORD allocationType, DWORD pro
+@@ -1537,6 +1693,16 @@ LPVOID VirtualAlloc(LPVOID address, SIZE_T size, DWORD allocationType, DWORD pro
  #endif
      void *p = mmap(address, size, prot ? prot : PROT_READ | PROT_WRITE,
                     flags, -1, 0);
@@ -5079,7 +5265,7 @@ index bb4f68d..53423e5 100644
      if (p == MAP_FAILED) { SetLastError(8); return NULL; }
  #if !defined(MAP_FIXED_NOREPLACE)
      if (owned) return p;
-@@ -1559,6 +1716,9 @@ LPVOID VirtualAlloc(LPVOID address, SIZE_T size, DWORD allocationType, DWORD pro
+@@ -1559,6 +1725,9 @@ LPVOID VirtualAlloc(LPVOID address, SIZE_T size, DWORD allocationType, DWORD pro
  BOOL VirtualFree(LPVOID address, SIZE_T size, DWORD freeType)
  {
      if (freeType & MEM_RELEASE) {
@@ -5089,7 +5275,7 @@ index bb4f68d..53423e5 100644
          /* Win32 MEM_RELEASE passes size 0; we can't know the length, so this
           * path is only safe when callers pass the real size. */
          if (size == 0) return TRUE;
-@@ -1685,7 +1845,7 @@ VOID DebugBreak(void) {
+@@ -1685,7 +1854,7 @@ VOID DebugBreak(void) {
  
  VOID SecureZeroMemory(PVOID ptr, SIZE_T cnt)
  {
@@ -5098,7 +5284,7 @@ index bb4f68d..53423e5 100644
      /* Darwin's memset_s is only declared when __STDC_WANT_LIB_EXT1__ is set
       * before every string.h in the translation unit, which is not something a
       * compat header can promise; Android's bionic has no explicit_bzero (and
-@@ -1996,6 +2156,11 @@ static int anon_map_fd(const char *name)
+@@ -1996,6 +2165,11 @@ static int anon_map_fd(const char *name)
              return fd;
          }
      }
@@ -5110,7 +5296,7 @@ index bb4f68d..53423e5 100644
  #else
      return memfd_create(name ? name : "xbox_map", 0);
  #endif
-@@ -2008,6 +2173,29 @@ HANDLE CreateFileMappingA(HANDLE file, LPSECURITY_ATTRIBUTES sa, DWORD protect,
+@@ -2008,6 +2182,29 @@ HANDLE CreateFileMappingA(HANDLE file, LPSECURITY_ATTRIBUTES sa, DWORD protect,
      SIZE_T size = ((SIZE_T)maxSizeHigh << 32) | maxSizeLow;
      if (size == 0) { SetLastError(ERROR_INVALID_PARAMETER); return NULL; }
  
@@ -5140,7 +5326,7 @@ index bb4f68d..53423e5 100644
      int fd = anon_map_fd(name);
      if (fd < 0) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); return NULL; }
      if (ftruncate(fd, (off_t)size) != 0) {
-@@ -2053,8 +2241,36 @@ LPVOID MapViewOfFileEx(HANDLE mapping, DWORD access, DWORD offHigh, DWORD offLow
+@@ -2053,8 +2250,36 @@ LPVOID MapViewOfFileEx(HANDLE mapping, DWORD access, DWORD offHigh, DWORD offLow
       * A hint plus a check gives what the callers actually mean: the kernel
       * honours it when the range is free, and anything else is a refusal. */
      int owned = inside_reservation(baseAddr, len);
@@ -5177,7 +5363,7 @@ index bb4f68d..53423e5 100644
      if (p == MAP_FAILED) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); return NULL; }
      if (!owned && baseAddr && p != baseAddr) {
          munmap(p, len);
-@@ -2074,6 +2290,15 @@ BOOL UnmapViewOfFile(LPCVOID baseAddr)
+@@ -2074,6 +2299,15 @@ BOOL UnmapViewOfFile(LPCVOID baseAddr)
  {
      size_t len = view_take(baseAddr);
      if (len == 0) return FALSE;
@@ -5193,7 +5379,7 @@ index bb4f68d..53423e5 100644
      return munmap((void *)baseAddr, len) == 0;
  }
  
-@@ -2126,6 +2351,18 @@ BOOL GlobalMemoryStatusEx(LPMEMORYSTATUSEX b)
+@@ -2126,6 +2360,18 @@ BOOL GlobalMemoryStatusEx(LPMEMORYSTATUSEX b)
          b->ullTotalPageFile = b->ullTotalPhys;
          b->ullAvailPageFile = b->ullAvailPhys;
      }
