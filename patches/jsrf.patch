@@ -1154,10 +1154,10 @@ index 20c9273..1f32680 100644
              g_is_gl = 0;
 diff --git a/src/nv2a_vk/nv2a_vk.c b/src/nv2a_vk/nv2a_vk.c
 new file mode 100644
-index 0000000..041ea2e
+index 0000000..ef606fd
 --- /dev/null
 +++ b/src/nv2a_vk/nv2a_vk.c
-@@ -0,0 +1,3037 @@
+@@ -0,0 +1,3287 @@
 +/*
 + * The NV2A renderer's device on Vulkan (nv2a_backend.h): the third backend,
 + * beside OpenGL (nv2a_gl/nv2a_gfx_gl.c) and Metal (nv2a_metal/nv2a_metal.m).
@@ -1345,6 +1345,8 @@ index 0000000..041ea2e
 +static uint64_t n_dropped;
 +static void capture_present(uint32_t rt);
 +static void capture_frame_done(int slot);
++static void capture_bind(uint32_t rt);
++static void capture_clear(unsigned mask, const float rgba[4], float depth, uint32_t stencil, const uint32_t rect[4]);
 +
 +static VkInstance g_instance;
 +static VkPhysicalDevice g_phys;
@@ -1900,6 +1902,7 @@ index 0000000..041ea2e
 +	trace_bind(g_cur_rt, h);
 +	pass_end();
 +	g_cur_rt = h;
++	capture_bind(h);
 +}
 +
 +static uint32_t vk_target_texture(uint32_t h)
@@ -3066,7 +3069,7 @@ index 0000000..041ea2e
 + * their sampling, blend, masks, alpha test, depth, stencil, culling, scissor), each texture it samples as a small BMP,
 + * each program's Vulkan GLSL, and the frame as shown. Then the mode switches itself off. At most 3 captures a run.
 + */
-+#define CAP_TEX 48
++#define CAP_TEX 384
 +#define CAP_BYTES (160u << 20)
 +static struct {
 +	int state;                 /* 0 off, 1 armed (from the next present), 2 capturing */
@@ -3076,7 +3079,8 @@ index 0000000..041ea2e
 +	VkDeviceMemory mem;
 +	uint8_t *map;
 +	uint32_t used;
-+	struct { uint32_t tex, w, h, at; } tex[CAP_TEX];
++	struct { uint32_t tex, w, h, at; Nv2aSampler smp; } tex[CAP_TEX];
++	FILE *ev;                  /* the frame's events in order: bind, clear, draw, present (D43) */
 +	uint32_t ntex;
 +	uint32_t frame_w, frame_h, frame_at;
 +	uint8_t prog_seen[MAX_PROG];
@@ -3135,7 +3139,7 @@ index 0000000..041ea2e
 +		image_layout(c, t->image, VK_IMAGE_ASPECT_COLOR_BIT, t->levels, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, l);
 +	barrier_all(c);
 +	g_cur_rt = keep;
-+	g_cap.tex[g_cap.ntex++] = (typeof(g_cap.tex[0])){hnd, t->w, t->h, g_cap.used};
++	g_cap.tex[g_cap.ntex++] = (typeof(g_cap.tex[0])){hnd, t->w, t->h, g_cap.used, t->smp};
 +	g_cap.used += bytes;
 +	return 1;
 +}
@@ -3196,11 +3200,19 @@ index 0000000..041ea2e
 +		FILE *fp = fopen(name, "wb");
 +		if (fp) {
 +			VkProg *p = &g_prog[g_cur_prog - 1];
-+			uint32_t nv = count < 16 ? count : 16, hd[24] = {0x31504143u /* CAP1 */, g_cur_prog, p->vu_size, p->fu_size,
++			uint32_t nv = count < 8192 ? count : 8192, hd[24] = {0x32504143u /* CAP2 */, g_cur_prog, p->vu_size, p->fu_size,
 +			                                                  g_vb_stride, nv};
 +			for (int i = 0; i < 16; i++)
 +				hd[6 + i] = (uint32_t)(int32_t)g_vb_at[i];
++			hd[22] = (uint32_t)prim;
++			hd[23] = count;
 +			fwrite(hd, 4, 24, fp);
++			uint32_t rsz = sizeof g_rs, bound[4];
++			fwrite(&rsz, 4, 1, fp);
++			fwrite(&g_rs, 1, sizeof g_rs, fp);
++			for (int u = 0; u < 4; u++)
++				bound[u] = ((smp >> u) & 1) ? g_bound[u] : 0;
++			fwrite(bound, 4, 4, fp);
 +			fwrite(p->vu, 1, p->vu_size, fp);
 +			fwrite(p->fu, 1, p->fu_size, fp);
 +			fwrite(g_generic, 1, sizeof g_generic, fp);
@@ -3209,6 +3221,8 @@ index 0000000..041ea2e
 +			fclose(fp);
 +		}
 +	}
++	if (g_cap.ev)
++		fprintf(g_cap.ev, "draw %u %d %u\n", d, prim, count);
 +	fprintf(stderr, "  [CAP] d%u %s rt%u p%u prim%d n%u |%s | blend %d %x/%x cm %08x atest %d %.3f | z %d/%d f%x | "
 +	                "st %d f%x ref%u ops %x/%x/%x | cull %d %x %x | sc %d %u,%u-%u,%u\n",
 +	        d, g_drop ? g_drop : "drawn", g_cur_rt, g_cur_prog, prim, count, texs, g_rs.blend_enable, g_rs.blend_src,
@@ -3216,6 +3230,23 @@ index 0000000..041ea2e
 +	        g_rs.stencil_test, g_rs.stencil_func, g_rs.stencil_ref, g_rs.stencil_op[0], g_rs.stencil_op[1],
 +	        g_rs.stencil_op[2], g_rs.cull_enable, g_rs.cull_face, g_rs.front_face, g_rs.scissor_enable,
 +	        g_rs.scissor[0], g_rs.scissor[1], g_rs.scissor[2], g_rs.scissor[3]);
++}
++
++static void capture_bind(uint32_t rt)
++{
++	if (g_cap.state == 2 && g_cap.ev && rt_ok(rt))
++		fprintf(g_cap.ev, "bind %u %u %u %u\n", rt, g_rt[rt - 1].pw, g_rt[rt - 1].ph, g_rt[rt - 1].color);
++}
++
++static void capture_clear(unsigned mask, const float rgba[4], float depth, uint32_t stencil, const uint32_t rect[4])
++{
++	if (g_cap.state != 2 || !g_cap.ev)
++		return;
++	fprintf(g_cap.ev, "clear %u %.9g %.9g %.9g %.9g %.9g %u", mask, rgba[0], rgba[1], rgba[2], rgba[3], depth, stencil);
++	if (rect)
++		fprintf(g_cap.ev, " %u %u %u %u\n", rect[0], rect[1], rect[2], rect[3]);
++	else
++		fprintf(g_cap.ev, "\n");
 +}
 +
 +/* At each present: arm, start, or finish (the shown target copied out) a capture. */
@@ -3236,6 +3267,15 @@ index 0000000..041ea2e
 +		g_cap.draws = g_cap.ntex = g_cap.used = 0;
 +		memset(g_cap.prog_seen, 0, sizeof g_cap.prog_seen);
 +		LOG("capture %d: from frame %llu\n", g_cap.n, (unsigned long long)n_frames + 1);
++		char ename[64];
++		snprintf(ename, sizeof ename, "/app0/vkcap/c%d_events.txt", g_cap.n);
++		g_cap.ev = fopen(ename, "w");
++		if (g_cap.ev) {
++			fprintf(g_cap.ev, "zrev %d\n", g_zrev);
++			if (rt_ok(g_cur_rt))
++				fprintf(g_cap.ev, "bind %u %u %u %u\n", g_cur_rt, g_rt[g_cur_rt - 1].pw, g_rt[g_cur_rt - 1].ph,
++				        g_rt[g_cur_rt - 1].color);
++		}
 +		return;
 +	}
 +	if (g_cap.state != 2)
@@ -3258,6 +3298,11 @@ index 0000000..041ea2e
 +			g_cap.used += bytes;
 +		}
 +	}
++	if (g_cap.ev) {
++		fprintf(g_cap.ev, "present %u\n", rt);
++		fclose(g_cap.ev);
++		g_cap.ev = NULL;
++	}
 +	LOG("capture %d: %u draws (%llu dropped so far in the run), %u textures\n", g_cap.n, g_cap.draws,
 +	    (unsigned long long)n_dropped, g_cap.ntex);
 +	g_cap.state = 0;
@@ -3274,6 +3319,16 @@ index 0000000..041ea2e
 +	for (uint32_t i = 0; i < g_cap.ntex; i++) {
 +		snprintf(name, sizeof name, "/app0/vkcap/c%d_t%u.bmp", g_cap.n, g_cap.tex[i].tex);
 +		cap_bmp(name, g_cap.map + g_cap.tex[i].at, g_cap.tex[i].w, g_cap.tex[i].h, 128);
++		/* and whole, for the frame replay: width, height, the sampler, the texels */
++		snprintf(name, sizeof name, "/app0/vkcap/c%d_t%u.raw", g_cap.n, g_cap.tex[i].tex);
++		FILE *fp = fopen(name, "wb");
++		if (fp) {
++			fwrite(&g_cap.tex[i].w, 4, 1, fp);
++			fwrite(&g_cap.tex[i].h, 4, 1, fp);
++			fwrite(&g_cap.tex[i].smp, 1, sizeof(Nv2aSampler), fp);
++			fwrite(g_cap.map + g_cap.tex[i].at, 4, (size_t)g_cap.tex[i].w * g_cap.tex[i].h, fp);
++			fclose(fp);
++		}
 +	}
 +	if (g_cap.frame_w) {
 +		snprintf(name, sizeof name, "/app0/vkcap/c%d_frame.bmp", g_cap.n);
@@ -3573,6 +3628,7 @@ index 0000000..041ea2e
 +	VkClearRect cr = {{{(int32_t)x0, (int32_t)y0}, {x1 - x0, y1 - y0}}, 0, 1};
 +	vkCmdClearAttachments(cmd(), n, at, 1, &cr);
 +	trace_clear(mask, rgba, rect);
++	capture_clear(mask, rgba, depth, stencil, rect);
 +}
 +
 +/* jsrf-ps5: the test modes' indicator (D41), a small picture made on the CPU, drawn over the top-left corner of every
@@ -4044,6 +4100,194 @@ index 0000000..041ea2e
 +	free(px);
 +}
 +
++
++/* A whole captured frame again (decision log D43): its events in order -- targets bound, clears, draws -- through this
++ * backend, with each draw's own state, inputs and textures, and the presented target written as rf<n>.bmp. */
++#define RF_MAP 512
++static void replay_frame(int n)
++{
++	char name[96];
++	snprintf(name, sizeof name, "/app0/vkcap/c%d_events.txt", n);
++	size_t len;
++	char *ev = (char *)replay_file(name, &len);
++	if (!ev) {
++		LOG("replay frame %d: no events\n", n);
++		return;
++	}
++	static uint32_t rt_from[RF_MAP], rt_to[RF_MAP], tex_from[RF_MAP], tex_to[RF_MAP], prog_from[RF_MAP], prog_to[RF_MAP];
++	uint32_t nrt = 0, ntex = 0, nprog = 0, cur = 0, draws = 0, failed = 0;
++	int keep_zrev = g_zrev;
++	char *save = NULL;
++	for (char *line = strtok_r(ev, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
++		unsigned a, b, c, d;
++		int zr;
++		if (sscanf(line, "zrev %d", &zr) == 1) {
++			g_zrev = zr;
++		} else if (sscanf(line, "bind %u %u %u %u", &a, &b, &c, &d) == 4) {
++			uint32_t i;
++			for (i = 0; i < nrt && rt_from[i] != a; i++)
++				;
++			if (i == nrt && nrt < RF_MAP) {
++				rt_from[nrt] = a;
++				rt_to[nrt] = vk_target_new(b, c);
++				/* the captured target's colour texture is this one's from now on */
++				if (ntex < RF_MAP && rt_to[nrt]) {
++					tex_from[ntex] = d;
++					tex_to[ntex++] = g_rt[rt_to[nrt] - 1].color;
++				}
++				nrt++;
++			}
++			if (i < nrt && rt_to[i]) {
++				vk_target_bind(rt_to[i]);
++				cur = rt_to[i];
++			}
++		} else if (!strncmp(line, "clear ", 6)) {
++			unsigned mask, st, r[4];
++			float rgba[4], depth;
++			int k = sscanf(line + 6, "%u %f %f %f %f %f %u %u %u %u %u", &mask, &rgba[0], &rgba[1], &rgba[2], &rgba[3],
++			               &depth, &st, &r[0], &r[1], &r[2], &r[3]);
++			if (k >= 7 && cur)
++				vk_clear(mask, rgba, depth, st, k == 11 ? r : NULL);
++		} else if (sscanf(line, "draw %u %u %u", &a, &b, &c) == 3) {
++			snprintf(name, sizeof name, "/app0/vkcap/c%d_d%u.bin", n, a);
++			size_t bl;
++			uint8_t *bin = replay_file(name, &bl);
++			if (!bin || bl < 100 || ((uint32_t *)bin)[0] != 0x32504143u) {
++				free(bin);
++				failed++;
++				continue;
++			}
++			uint32_t hd[24], rsz, bound[4];
++			memcpy(hd, bin, sizeof hd);
++			memcpy(&rsz, bin + 96, 4);
++			const uint8_t *q = bin + 100;
++			Nv2aRenderState rs;
++			memcpy(&rs, q, rsz < sizeof rs ? rsz : sizeof rs);
++			q += rsz;
++			memcpy(bound, q, sizeof bound);
++			q += sizeof bound;
++			uint32_t vus = hd[2], fus = hd[3], stride = hd[4], nv = hd[5];
++			const uint8_t *vu = q, *fu = vu + vus;
++			const float *gen = (const float *)(fu + fus), *verts = gen + 64;
++			if ((size_t)(q - bin) + vus + fus + 256 + (size_t)stride * nv * 4 > bl) {
++				free(bin);
++				failed++;
++				continue;
++			}
++			/* the program, made once from the capture's Vulkan GLSL */
++			uint32_t i;
++			for (i = 0; i < nprog && prog_from[i] != hd[1]; i++)
++				;
++			if (i == nprog && nprog < RF_MAP) {
++				size_t vl, fl;
++				snprintf(name, sizeof name, "/app0/vkcap/c%d_p%u.vert", n, hd[1]);
++				char *vs = (char *)replay_file(name, &vl);
++				snprintf(name, sizeof name, "/app0/vkcap/c%d_p%u.frag", n, hd[1]);
++				char *fs = (char *)replay_file(name, &fl);
++				uint32_t slot;
++				for (slot = 0; slot < MAX_PROG && g_prog[slot].used; slot++)
++					;
++				prog_from[nprog] = hd[1];
++				prog_to[nprog] = 0;
++				if (vs && fs && slot < MAX_PROG) {
++					VkProg *p = &g_prog[slot];
++					memset(p, 0, sizeof *p);
++					p->vs = compile_stage(vs, GLSLANG_STAGE_VERTEX, "replay");
++					p->fs = compile_stage(fs, GLSLANG_STAGE_FRAGMENT, "replay");
++					for (int at = 0; at < 16; at++) {
++						char pat[32];
++						snprintf(pat, sizeof pat, "in vec4 v%d;", at);
++						if (strstr(vs, pat)) p->inputs |= 1u << at;
++					}
++					for (int u = 0; u < 4; u++) {
++						char pat[48];
++						snprintf(pat, sizeof pat, "binding = %d) uniform sampler2D", 2 + u);
++						if (strstr(fs, pat)) p->samplers |= 1u << u;
++					}
++					for (int s2 = 0; s2 < 2; s2++)
++						for (int u = 0; u < NV2A_U_COUNT; u++) p->off[s2][u] = -1;
++					p->used = p->vs && p->fs;
++					if (p->used)
++						prog_to[nprog] = slot + 1;
++				}
++				free(vs);
++				free(fs);
++				nprog++;
++			}
++			uint32_t ph = i < nprog ? prog_to[i] : 0;
++			if (!ph) {
++				free(bin);
++				failed++;
++				continue;
++			}
++			VkProg *p = &g_prog[ph - 1];
++			free(p->vu);
++			free(p->fu);
++			p->vu = malloc(vus ? vus : 16);
++			p->fu = malloc(fus ? fus : 16);
++			memcpy(p->vu, vu, vus);
++			memcpy(p->fu, fu, fus);
++			p->vu_size = vus;
++			p->fu_size = fus;
++			p->dirty_v = p->dirty_f = 1;
++			/* its textures: a target's colour as the replay's target, anything else from the capture's raw file */
++			uint32_t tx[4] = {0};
++			for (int u = 0; u < 4; u++) {
++				if (!bound[u])
++					continue;
++				uint32_t k;
++				for (k = 0; k < ntex && tex_from[k] != bound[u]; k++)
++					;
++				if (k == ntex && ntex < RF_MAP) {
++					snprintf(name, sizeof name, "/app0/vkcap/c%d_t%u.raw", n, bound[u]);
++					size_t tl;
++					uint8_t *raw = replay_file(name, &tl);
++					tex_from[ntex] = bound[u];
++					tex_to[ntex] = 0;
++					if (raw && tl >= 8 + sizeof(Nv2aSampler)) {
++						uint32_t w, h;
++						Nv2aSampler sm;
++						memcpy(&w, raw, 4);
++						memcpy(&h, raw + 4, 4);
++						memcpy(&sm, raw + 8, sizeof sm);
++						sm.levels = 0; /* the replay has level 0 only; the device makes the rest */
++						if (tl >= 8 + sizeof sm + (size_t)w * h * 4)
++							tex_to[ntex] = vk_tex_new(w, h, raw + 8 + sizeof sm, &sm);
++					}
++					free(raw);
++					ntex++;
++				}
++				tx[u] = k < ntex ? tex_to[k] : 0;
++			}
++			int at16[16];
++			uint32_t cmask = 0;
++			for (int at = 0; at < 16; at++) {
++				at16[at] = (int)hd[6 + at];
++				if (at16[at] < 0) cmask |= 1u << at;
++			}
++			g_rs = rs;
++			vk_vertices(verts, nv, stride, at16, cmask, (const float (*)[4])gen);
++			g_cur_prog = ph;
++			for (int u = 0; u < 4; u++) vk_texture(u, tx[u]);
++			vk_draw((int)hd[22], nv < hd[23] ? nv : hd[23]);
++			draws++;
++			free(bin);
++		} else if (sscanf(line, "present %u", &a) == 1) {
++			uint32_t i;
++			for (i = 0; i < nrt && rt_from[i] != a; i++)
++				;
++			snprintf(name, sizeof name, "/app0/vkcap/rf%d.bmp", n);
++			if (i < nrt && rt_to[i])
++				replay_bmp(name, rt_to[i], 0);
++		}
++	}
++	LOG("replay frame %d: %u draws, %u failed, %u targets, %u textures, %u programs\n", n, draws, failed, nrt, ntex,
++	    nprog);
++	g_zrev = keep_zrev;
++	g_cur_prog = 0;
++	free(ev);
++}
++
 +void nv2a_vk_replay(const char *list)
 +{
 +	size_t len;
@@ -4053,8 +4297,14 @@ index 0000000..041ea2e
 +		free(txt);
 +		return;
 +	}
-+	for (char *line = strtok(txt, "\n"); line; line = strtok(NULL, "\n")) {
++	char *save = NULL;
++	for (char *line = strtok_r(txt, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
 +		char bin[128], vsn[128], fsn[128], tn[4][128], out[128];
++		int fr;
++		if (sscanf(line, "frame %d", &fr) == 1) {
++			replay_frame(fr);
++			continue;
++		}
 +		int st[8] = {0, 0x302, 0x303, 0, 0, 0x203, 0, 0x405};
 +		int fe = 0x900;
 +		if (sscanf(line, "%127s %127s %127s %127s %127s %127s %127s %127s %d %x %x %d %d %x %d %x %x", bin, vsn, fsn,
