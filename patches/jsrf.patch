@@ -1154,10 +1154,10 @@ index 20c9273..1f32680 100644
              g_is_gl = 0;
 diff --git a/src/nv2a_vk/nv2a_vk.c b/src/nv2a_vk/nv2a_vk.c
 new file mode 100644
-index 0000000..822b371
+index 0000000..041ea2e
 --- /dev/null
 +++ b/src/nv2a_vk/nv2a_vk.c
-@@ -0,0 +1,3010 @@
+@@ -0,0 +1,3037 @@
 +/*
 + * The NV2A renderer's device on Vulkan (nv2a_backend.h): the third backend,
 + * beside OpenGL (nv2a_gl/nv2a_gfx_gl.c) and Metal (nv2a_metal/nv2a_metal.m).
@@ -1234,7 +1234,8 @@ index 0000000..822b371
 +	X(CmdClearDepthStencilImage) X(CmdCopyBufferToImage) X(CmdCopyImageToBuffer) X(CmdCopyImage)               \
 +	X(CmdBlitImage) X(CmdSetCullMode) X(CmdSetFrontFace) X(CmdSetPrimitiveTopology) X(CmdSetDepthTestEnable)  \
 +	X(CmdSetDepthWriteEnable) X(CmdSetDepthCompareOp) X(CmdSetStencilTestEnable) X(CmdSetStencilOp)           \
-+	X(CmdSetStencilCompareMask) X(CmdSetStencilWriteMask) X(CmdSetStencilReference) X(DeviceWaitIdle)
++	X(CmdSetStencilCompareMask) X(CmdSetStencilWriteMask) X(CmdSetStencilReference) X(DeviceWaitIdle) \
++	X(CmdSetDepthBias) X(CmdSetDepthBiasEnable)
 +
 +#define DECLARE(name) static PFN_vk##name vk##name;
 +INSTANCE_COMMANDS(DECLARE)
@@ -1326,7 +1327,8 @@ index 0000000..822b371
 + *   NOCULL   no face culling;
 + *   TRACE    the surface trace below.
 + */
-+enum { JSRF_VK_RESOLVE = 1, JSRF_VK_ALPHA1 = 2, JSRF_VK_NOCULL = 4, JSRF_VK_TRACE = 8, JSRF_VK_CAPTURE = 16 };
++enum { JSRF_VK_RESOLVE = 1, JSRF_VK_ALPHA1 = 2, JSRF_VK_NOCULL = 4, JSRF_VK_TRACE = 8, JSRF_VK_CAPTURE = 16,
++       JSRF_VK_DECALBIAS = 32, JSRF_VK_BLENDNOZ = 64 };
 +uint32_t jsrf_vk_modes;
 +void jsrf_ps5_frame_hook(void) __attribute__((weak)); /* once a frame, from present */
 +static uint32_t g_ovl;                                /* the indicator's texture, 0 for none */
@@ -1384,7 +1386,7 @@ index 0000000..822b371
 +static struct {
 +	int valid;
 +	VkPipeline pipe;
-+	int cull, wind, topo, dt, dw, df, st;
++	int cull, wind, topo, dt, dw, df, st, bias;
 +	uint32_t sfunc, sops, rmask, wmask, ref;
 +	VkRect2D sc;
 +} E;
@@ -2665,7 +2667,7 @@ index 0000000..822b371
 +		VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY, VK_DYNAMIC_STATE_DEPTH_TEST_ENABLE, VK_DYNAMIC_STATE_DEPTH_WRITE_ENABLE,
 +		VK_DYNAMIC_STATE_DEPTH_COMPARE_OP, VK_DYNAMIC_STATE_STENCIL_TEST_ENABLE, VK_DYNAMIC_STATE_STENCIL_OP,
 +		VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK, VK_DYNAMIC_STATE_STENCIL_WRITE_MASK,
-+		VK_DYNAMIC_STATE_STENCIL_REFERENCE};
++		VK_DYNAMIC_STATE_STENCIL_REFERENCE, VK_DYNAMIC_STATE_DEPTH_BIAS, VK_DYNAMIC_STATE_DEPTH_BIAS_ENABLE};
 +	VkPipelineDynamicStateCreateInfo dy = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
 +	                                       .dynamicStateCount = sizeof dyn / sizeof dyn[0], .pDynamicStates = dyn};
 +	VkPipelineRenderingCreateInfo rinfo = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
@@ -3474,6 +3476,18 @@ index 0000000..822b371
 +		E.topo = topo;
 +	}
 +	int dt = g_rs.depth_test != 0, dw = dt && g_rs.depth_write, df = (int)cmp_of((uint32_t)g_rs.depth_func);
++	/* Test modes (D43): a blended draw with a depth test -- a decal over a wall -- nudged toward the camera, or
++	 * drawn with no depth test at all. Toward the camera is a larger depth with reversed depth, a smaller one
++	 * without. */
++	int bias = dt && g_rs.blend_enable && (jsrf_vk_modes & JSRF_VK_DECALBIAS);
++	if (dt && g_rs.blend_enable && (jsrf_vk_modes & JSRF_VK_BLENDNOZ))
++		dt = dw = 0;
++	if (!E.valid || E.bias != bias) {
++		vkCmdSetDepthBiasEnable(c, (VkBool32)bias);
++		if (bias)
++			vkCmdSetDepthBias(c, g_zrev ? 16.0f : -16.0f, 0.0f, g_zrev ? 1.0f : -1.0f);
++		E.bias = bias;
++	}
 +	if (!E.valid || E.dt != dt) { vkCmdSetDepthTestEnable(c, (VkBool32)dt); E.dt = dt; }
 +	if (!E.valid || E.dw != dw) { vkCmdSetDepthWriteEnable(c, (VkBool32)dw); E.dw = dw; }
 +	if (!E.valid || E.df != df) { vkCmdSetDepthCompareOp(c, (VkCompareOp)df); E.df = df; }
@@ -4099,17 +4113,28 @@ index 0000000..822b371
 +			aat[a] = at[a];
 +			if (at[a] < 0) cmask |= 1u << a;
 +		}
-+		for (int var = 0; var < 2 && p->used; var++) {
++		/* A nothing, B all of the state, C culling only, D culling with the front face turned, E depth only,
++		 * F blending only */
++		for (int var = 0; var < 6 && p->used; var++) {
 +			uint32_t rt = vk_target_new(1280, 960);
 +			vk_target_bind(rt);
 +			float bg[4] = {0.2f, 0.2f, 0.2f, 0.0f};
-+			vk_clear(7, bg, g_zrev ? 0.0f : 1.0f, 0, NULL);
++			/* the far plane for the function given (the front half turns them round with reversed depth, which
++			 * is not yet on when the replay runs) */
++			vk_clear(7, bg, (st[5] == 0x204 || st[5] == 0x206) ? 0.0f : 1.0f, 0, NULL);
 +			memset(&g_rs, 0, sizeof g_rs);
 +			g_rs.color_mask = 0x01010101u;
-+			if (var) {
++			g_rs.front_face = fe;
++			if (var == 1 || var == 5) {
 +				g_rs.blend_enable = st[0]; g_rs.blend_src = st[1]; g_rs.blend_dst = st[2];
++			}
++			if (var == 1 || var == 4) {
 +				g_rs.depth_test = st[3]; g_rs.depth_write = st[4]; g_rs.depth_func = st[5];
-+				g_rs.cull_enable = st[6]; g_rs.cull_face = st[7]; g_rs.front_face = fe;
++			}
++			if (var == 1 || var == 2 || var == 3) {
++				g_rs.cull_enable = st[6]; g_rs.cull_face = st[7];
++				if (var == 3)
++					g_rs.front_face = fe == 0x901 ? 0x900 : 0x901;
 +			}
 +			E.valid = 0;
 +			vk_vertices(verts, nv, stride, aat, cmask, (const float (*)[4])gen);
@@ -4117,19 +4142,21 @@ index 0000000..822b371
 +			for (int u = 0; u < 4; u++) vk_texture(u, tex[u]);
 +			vk_draw(NV2A_PRIM_TRIANGLES, nv / 3 * 3);
 +			char name[192];
-+			snprintf(name, sizeof name, "/app0/vkcap/%s_%c.bmp", out, var ? 'B' : 'A');
++			snprintf(name, sizeof name, "/app0/vkcap/%s_%c.bmp", out, 'A' + var);
 +			replay_bmp(name, rt, 0);
-+			snprintf(name, sizeof name, "/app0/vkcap/%s_%c_alpha.bmp", out, var ? 'B' : 'A');
-+			replay_bmp(name, rt, 1);
-+			vk_target_free(rt);
++			/* the targets, textures and program stay: freeing them here crashed in the next frame_start, and the
++			 * replay runs once */
 +		}
 +		if (!p->used) LOG("replay: %s: shaders did not compile\n", out);
-+		vk_prog_free((uint32_t)i + 1);
-+		for (int u = 0; u < 4; u++) if (tex[u]) vk_tex_free(tex[u]);
++		if (g_cur_prog == (uint32_t)i + 1)
++			g_cur_prog = 0;
 +		free(b); free(vs); free(fs);
 +	}
 +	free(txt);
 +	submit(VK_NULL_HANDLE, VK_NULL_HANDLE, 1);
++	g_cur_rt = 0;
++	memset(&g_rs, 0, sizeof g_rs);
++	E.valid = 0;
 +	LOG("replay done\n");
 +}
 +
