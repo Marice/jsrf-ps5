@@ -610,7 +610,7 @@ index f3668a7..05b3dc5 100644
  
  #define FPS_MAX 512
 diff --git a/src/kernel/xbox_memory_layout.c b/src/kernel/xbox_memory_layout.c
-index 99d17e7..a756c49 100644
+index 99d17e7..79adee2 100644
 --- a/src/kernel/xbox_memory_layout.c
 +++ b/src/kernel/xbox_memory_layout.c
 @@ -214,6 +214,27 @@ static void nv2a_kick_signal(void)
@@ -655,9 +655,9 @@ index 99d17e7..a756c49 100644
   */
 +#if defined(JSRF_PS5)
 +/*
-+ * The handshake bits again, from inside the pushbuffer walk (jsrf-ps5 D47).
-+ * The ack thread clears the busy bits above and sets the idle ones once a
-+ * round, and a round includes the whole walk -- up to a frame's methods. A
++ * The flush kick and the FIFO idle bits again, from inside the pushbuffer
++ * walk (jsrf-ps5 D47). The ack thread clears the busy bits above and sets
++ * the idle ones once a round, and a round includes the whole walk -- up to a frame's methods. A
 + * title that kicks a framebuffer flush (0x100410) or polls an interrupt or
 + * FIFO status spins until then: JSRF's frame code waited on the flush kick
 + * for a whole walk every frame, so the game and the renderer took turns
@@ -671,13 +671,13 @@ index 99d17e7..a756c49 100644
 +{
 +    volatile uint32_t *regs = s_ack_regs;
 +    if (!regs) return;
-+    for (size_t i = 0; i < sizeof(NV2A_ACK) / sizeof(NV2A_ACK[0]); i++) {
-+        volatile uint32_t *r = (volatile uint32_t *)((char *)regs + NV2A_ACK[i].offset);
-+        extern int xbox_nv2a_swm_in_flight(void);
-+        if (NV2A_ACK[i].offset == 0x400100u && xbox_nv2a_swm_in_flight())
-+            continue;
-+        if (*r & NV2A_ACK[i].busy_mask)
-+            *r &= ~NV2A_ACK[i].busy_mask;
++    /* Only the flush kick: the interrupt status registers stay with the
++     * round. Clearing PGRAPH_INTR from the walk lost the software methods'
++     * interrupts (delivered 0) and the title screen never came. */
++    {
++        volatile uint32_t *r = (volatile uint32_t *)((char *)regs + 0x100410);
++        if (*r & 0x00010000u)
++            *r &= ~0x00010000u;
 +    }
 +    for (size_t i = 0; i < sizeof(NV2A_IDLE) / sizeof(NV2A_IDLE[0]); i++) {
 +        volatile uint32_t *r = (volatile uint32_t *)((char *)regs + NV2A_IDLE[i].offset);
