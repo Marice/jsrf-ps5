@@ -752,6 +752,8 @@ void ps5_log_main_cores(void)
 	spread_over_cores(0);
 }
 
+void jsrf_prof_register(int number); /* below */
+
 static void* thread_trampoline(void* opaque)
 {
 	struct thread_start launch = *(struct thread_start*)opaque;
@@ -768,6 +770,7 @@ static void* thread_trampoline(void* opaque)
 	fprintf(stderr, "jsrf: thread %d started, stack %zu KiB near %p\n",
 	        launch.number, launch.stack / 1024, (void*)&here);
 	spread_over_cores(launch.number);
+	jsrf_prof_register(launch.number); /* the profiler's (D45) */
 	return launch.start(launch.arg);
 }
 
@@ -1006,65 +1009,93 @@ int __wrap_lstat(const char* path, struct stat* info)
 }
 
 
-/* --- A sampling profiler for the render thread (decision log D45) ---------
+/* --- A sampling profiler for the game's threads (decision log D45) ---------
 
-   The render thread (the pushbuffer walk and the renderer) is busy ~95% of
-   its time in busy scenes; which functions that time goes to is not visible
-   from timers around whole stages. Once switched on (jsrf_prof_set), a thread
-   of its own sends the render thread a signal about every millisecond; the
-   handler counts the instruction it interrupted. Every ten seconds the 40
-   addresses counted most go to the log (llvm-symbolizer names them against
-   the ELF). The samples live in memory; ~40 log lines per ten seconds. */
+   Once switched on (jsrf_prof_set), a thread of its own sends every thread
+   that registered (each thread started through thread_trampoline, and the
+   render thread) a signal about every millisecond; the handler counts the
+   instruction it interrupted, per thread, and for an instruction in the
+   system's libraries (from 0x800000000) also the first return address on the
+   stack in the game's own code: who called into them. Every ten seconds,
+   per thread with samples, its share and its most counted addresses go to
+   the log (llvm-symbolizer names them against the ELF). All in memory. */
 #include <ucontext.h>
 
-#define PROF_SLOTS 8192
-static pthread_t g_prof_target;
-static volatile int g_prof_have, g_prof_on, g_prof_started;
-static struct { uintptr_t pc; uint32_t n; } g_prof_hist[PROF_SLOTS];
-/* Samples in the system's libraries (from 0x800000000), counted by the first return address on the stack that is in
- * the game's own code: who called into them. */
-static struct { uintptr_t pc; uint32_t n; } g_prof_callers[PROF_SLOTS];
-static volatile uint32_t g_prof_sys;
-static volatile uint32_t g_prof_total, g_prof_lost;
+#define PROF_THREADS 48
+#define PROF_SLOTS 2048
+typedef struct { uintptr_t pc; uint32_t n; } prof_bin;
+static struct {
+	pthread_t thread;
+	int number;          /* thread_trampoline's number; -1 the render thread */
+	volatile uint32_t total, sys;
+	prof_bin pcs[PROF_SLOTS], callers[PROF_SLOTS];
+} g_prof[PROF_THREADS];
+static volatile int g_prof_count, g_prof_on, g_prof_started;
+
+void jsrf_prof_register(int number)
+{
+	int i = __atomic_fetch_add(&g_prof_count, 1, __ATOMIC_SEQ_CST);
+	if (i >= PROF_THREADS) return;
+	g_prof[i].thread = pthread_self();
+	g_prof[i].number = number;
+}
 
 void jsrf_ps5_render_thread(void)
 {
-	g_prof_target = pthread_self();
-	g_prof_have = 1;
+	jsrf_prof_register(-1);
+}
+
+static void prof_count(prof_bin* bins, uintptr_t pc)
+{
+	uint32_t h = (uint32_t)((pc >> 2) * 2654435761u) & (PROF_SLOTS - 1);
+	for (int i = 0; i < 16; i++) {
+		uint32_t k = (h + (uint32_t)i) & (PROF_SLOTS - 1);
+		if (bins[k].pc == pc || bins[k].pc == 0) {
+			bins[k].pc = pc;
+			bins[k].n++;
+			return;
+		}
+	}
 }
 
 static void prof_sample(int signal_number, siginfo_t* info, void* context)
 {
 	(void)signal_number;
 	(void)info;
-	const uintptr_t pc = (uintptr_t)((const ucontext_t*)context)->uc_mcontext.mc_rip;
-	uint32_t h = (uint32_t)((pc >> 2) * 2654435761u) & (PROF_SLOTS - 1);
-	g_prof_total++;
+	pthread_t self = pthread_self();
+	int t, n = g_prof_count < PROF_THREADS ? g_prof_count : PROF_THREADS;
+	for (t = 0; t < n && g_prof[t].thread != self; t++)
+		;
+	if (t == n) return;
+	const ucontext_t* uc = (const ucontext_t*)context;
+	const uintptr_t pc = (uintptr_t)uc->uc_mcontext.mc_rip;
+	g_prof[t].total++;
+	prof_count(g_prof[t].pcs, pc);
 	if (pc >= 0x800000000ull) {
-		const uintptr_t* sp = (const uintptr_t*)(uintptr_t)((const ucontext_t*)context)->uc_mcontext.mc_rsp;
+		const uintptr_t* sp = (const uintptr_t*)(uintptr_t)uc->uc_mcontext.mc_rsp;
 		uintptr_t caller = 0;
 		for (int i = 0; i < 64 && sp; i++)
 			if (is_game_code((const char*)sp[i])) { caller = sp[i]; break; }
-		g_prof_sys++;
-		uint32_t c = (uint32_t)((caller >> 2) * 2654435761u) & (PROF_SLOTS - 1);
-		for (int i = 0; i < 16; i++) {
-			uint32_t k = (c + (uint32_t)i) & (PROF_SLOTS - 1);
-			if (g_prof_callers[k].pc == caller || g_prof_callers[k].pc == 0) {
-				g_prof_callers[k].pc = caller;
-				g_prof_callers[k].n++;
-				break;
-			}
-		}
+		g_prof[t].sys++;
+		prof_count(g_prof[t].callers, caller);
 	}
-	for (int i = 0; i < 16; i++) {
-		uint32_t k = (h + (uint32_t)i) & (PROF_SLOTS - 1);
-		if (g_prof_hist[k].pc == pc || g_prof_hist[k].pc == 0) {
-			g_prof_hist[k].pc = pc;
-			g_prof_hist[k].n++;
-			return;
-		}
+}
+
+static void prof_top(const char* what, int number, const prof_bin* bins, uint32_t total, int want)
+{
+	prof_bin top[16];
+	memset(top, 0, sizeof top);
+	if (want > 16) want = 16;
+	for (int k = 0; k < PROF_SLOTS; k++) {
+		const uint32_t n = bins[k].n;
+		if (n <= top[want - 1].n) continue;
+		int j = want - 1;
+		while (j > 0 && top[j - 1].n < n) { top[j] = top[j - 1]; j--; }
+		top[j] = bins[k];
 	}
-	g_prof_lost++;
+	for (int j = 0; j < want && top[j].n; j++)
+		fprintf(stderr, "  [PROF] t%d %s %p %u %.1f%%\n", number, what, (void*)top[j].pc, top[j].n,
+		        100.0 * top[j].n / total);
 }
 
 static void* prof_thread(void* unused)
@@ -1073,41 +1104,29 @@ static void* prof_thread(void* unused)
 	unsigned ticks = 0;
 	for (;;) {
 		usleep(1000);
-		if (!g_prof_on || !g_prof_have) continue;
-		pthread_kill(g_prof_target, SIGUSR2);
-		if (++ticks < 10000 || g_prof_total == 0) continue;
+		if (!g_prof_on) continue;
+		int n = g_prof_count < PROF_THREADS ? g_prof_count : PROF_THREADS;
+		for (int t = 0; t < n; t++)
+			pthread_kill(g_prof[t].thread, SIGUSR2);
+		if (++ticks < 10000) continue;
 		ticks = 0;
-		/* the 40 counted most, then start over */
-		static struct { uintptr_t pc; uint32_t n; } top[40];
-		memset(top, 0, sizeof top);
-		for (int k = 0; k < PROF_SLOTS; k++) {
-			const uint32_t n = g_prof_hist[k].n;
-			if (n <= top[39].n) continue;
-			int j = 39;
-			while (j > 0 && top[j - 1].n < n) { top[j] = top[j - 1]; j--; }
-			top[j].pc = g_prof_hist[k].pc;
-			top[j].n = n;
+		fprintf(stderr, "  [PROF] ---- %d threads, ten seconds ----\n", n);
+		for (int t = 0; t < n; t++) {
+			const uint32_t total = g_prof[t].total, sys = g_prof[t].sys;
+			if (!total) continue;
+			fprintf(stderr, "  [PROF] t%d: %u samples, %u (%.0f%%) in the system's libraries\n", g_prof[t].number,
+			        total, sys, 100.0 * sys / total);
+			/* the busy ones in detail: a thread mostly waiting shows only its line above */
+			if (total - sys > total / 5 || g_prof[t].number < 0) {
+				prof_top("at", g_prof[t].number, g_prof[t].pcs, total, 12);
+				prof_top("from", g_prof[t].number, g_prof[t].callers, total, 8);
+			}
 		}
-		const uint32_t total = g_prof_total, lost = g_prof_lost;
-		fprintf(stderr, "  [PROF] %u samples of the render thread (%u not placed); the most counted:\n", total, lost);
-		for (int j = 0; j < 40 && top[j].n; j++)
-			fprintf(stderr, "  [PROF] %p %u %.1f%%\n", (void*)top[j].pc, top[j].n, 100.0 * top[j].n / total);
-		/* who called into the system's libraries, the 20 counted most */
-		memset(top, 0, sizeof top);
-		for (int k = 0; k < PROF_SLOTS; k++) {
-			const uint32_t n = g_prof_callers[k].n;
-			if (n <= top[19].n) continue;
-			int j = 19;
-			while (j > 0 && top[j - 1].n < n) { top[j] = top[j - 1]; j--; }
-			top[j].pc = g_prof_callers[k].pc;
-			top[j].n = n;
+		for (int t = 0; t < n; t++) {
+			memset(g_prof[t].pcs, 0, sizeof g_prof[t].pcs);
+			memset(g_prof[t].callers, 0, sizeof g_prof[t].callers);
+			g_prof[t].total = g_prof[t].sys = 0;
 		}
-		fprintf(stderr, "  [PROF] %u of them in the system's libraries, called from:\n", g_prof_sys);
-		for (int j = 0; j < 20 && top[j].n; j++)
-			fprintf(stderr, "  [PROF] caller %p %u %.1f%%\n", (void*)top[j].pc, top[j].n, 100.0 * top[j].n / total);
-		memset(g_prof_hist, 0, sizeof g_prof_hist);
-		memset(g_prof_callers, 0, sizeof g_prof_callers);
-		g_prof_total = g_prof_lost = g_prof_sys = 0;
 	}
 	return NULL;
 }
@@ -1125,10 +1144,10 @@ void jsrf_prof_set(int on)
 		if (__real_pthread_create(&t, NULL, prof_thread, NULL) == 0) {
 			pthread_detach(t);
 			g_prof_started = 1;
-			fprintf(stderr, "jsrf: render thread profiler started\n");
+			fprintf(stderr, "jsrf: thread profiler started\n");
 		}
 	}
 	if (on != g_prof_on)
-		fprintf(stderr, "jsrf: render thread profiler %s\n", on ? "on" : "off");
+		fprintf(stderr, "jsrf: thread profiler %s\n", on ? "on" : "off");
 	g_prof_on = on;
 }

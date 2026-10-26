@@ -362,6 +362,10 @@ int nv_ps5_main(int argc, char **argv, int (*host)(void))
 	/* The status screen's context lets go of the surface on this thread: the renderer makes its own current on its
 	   thread, and EGL refused that while this one was still current here (0x3009, decision log D5). */
 	jsrf_ps5_status_end();
+	{
+		extern void jsrf_prof_register(int number); /* the thread profiler's (D45): the main thread is -2 */
+		jsrf_prof_register(-2);
+	}
 	if (jsrf_ps5_gl_prepare() != 0)
 		return stay_with("NO OPENGL CONTEXT FOR THE RENDERER", "SEE JSRF.LOG IN THE TITLE FOLDER");
 	mkdir(SAVE_DIR, 0755);
