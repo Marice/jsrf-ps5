@@ -771,12 +771,12 @@ static void* thread_trampoline(void* opaque)
 	        launch.number, launch.stack / 1024, (void*)&here);
 	spread_over_cores(launch.number);
 	jsrf_prof_register(launch.number); /* the profiler's (D45) */
-	{
-		/* this thread's control block may be a dead thread's: forget its register block (D51) */
-		extern void recomp_regfile_forget(void);
-		recomp_regfile_forget();
-	}
-	return launch.start(launch.arg);
+	/* the register block found by the stack pointer (D55) */
+	extern void recomp_regfile_stack(uintptr_t top, size_t size, int enter);
+	recomp_regfile_stack(t_stack_top, launch.stack, 1);
+	void* result = launch.start(launch.arg);
+	recomp_regfile_stack(t_stack_top, launch.stack, 0);
+	return result;
 }
 
 int32_t sceKernelAvailableFlexibleMemorySize(size_t* size);

@@ -745,7 +745,7 @@ index f3668a7..05b3dc5 100644
  
  #define FPS_MAX 512
 diff --git a/src/kernel/xbox_memory_layout.c b/src/kernel/xbox_memory_layout.c
-index 99d17e7..0092cc6 100644
+index 99d17e7..68c4fbf 100644
 --- a/src/kernel/xbox_memory_layout.c
 +++ b/src/kernel/xbox_memory_layout.c
 @@ -214,6 +214,27 @@ static void nv2a_kick_signal(void)
@@ -1082,7 +1082,7 @@ index 99d17e7..0092cc6 100644
      }
      return 0;
  }
-@@ -951,7 +1192,97 @@ uint32_t g_xbox_code_hi = 0;
+@@ -951,7 +1192,87 @@ uint32_t g_xbox_code_hi = 0;
  /* Global registers for recompiled code (via recomp_types.h) */
  /* Each guest thread's TIB. The first thread uses the one the loader built;
   * a spawned thread gets its own from xbox_AllocThreadTib(). */
@@ -1104,83 +1104,73 @@ index 99d17e7..0092cc6 100644
 +};
 +
 +/* Where s_regfile is, per thread, without asking emulated TLS each time
-+ * (jsrf-ps5 D51). The lifted code consists of many small functions, each of
-+ * which asks once, and xbox_GuestCpuPreempt asks on every loop back edge
-+ * while another thread waits for the guest lock: after D50 a quarter of the
-+ * game thread was still __emutls_get_address. The thread's own control block
-+ * address (%fs:0 on this FreeBSD-derived system, as libkernel's own TLS reads
-+ * it) keys a small table of each thread's block. An entry is written as
-+ * key 0, block, key; read as key, block, key again, so a reader never takes
-+ * another thread's block from a slot being rewritten. A thread clears its
-+ * slot when it starts (recomp_regfile_forget, from the thread trampoline):
-+ * a new thread at a dead one's control block never gets the dead one's. */
-+#define RF_SLOTS 256
-+static struct { uintptr_t tcb; RecompRegFile *rf; } s_rf_cache[RF_SLOTS];
-+/* The table is used only while every thread's control block has pointed at
-+ * itself (FreeBSD's tcb_self), checked at start-up and at each thread's
-+ * start; otherwise every call goes to emulated TLS as before. */
-+static int s_rf_ok = -1;
++ * (jsrf-ps5 D51, D55). The lifted code consists of many small functions, each
++ * of which asks once, and xbox_GuestCpuPreempt asks on every loop back edge
++ * while another thread waits for the guest lock: after D54 a seventh of the
++ * game thread was still __emutls_get_address. D51 keyed a table by the
++ * thread's control block, but on the console that does not point at itself,
++ * so the table stayed off. The stack pointer is a key that cannot be shared:
++ * the stacks of living threads never overlap. A thread started by the thread
++ * trampoline enters every page of its stack here, page number to its block
++ * (recomp_regfile_stack), and takes them out when it ends. A slot is chosen
++ * by the page number, so a thread's pages never collide with each other; a
++ * page whose slot another thread's page took, a thread that entered nothing
++ * (the main thread, the platform's) and a signal stack ask emulated TLS as
++ * before. An entry is written as page 0, block, page; read as page, block,
++ * page again, so a reader never takes a block from a slot being rewritten. */
++#define RF_PAGES 16384
++static struct { uintptr_t page; RecompRegFile *rf; } s_rf_pages[RF_PAGES];
 +
-+static inline uintptr_t rf_tcb(void)
++static inline uintptr_t rf_sp_page(void)
 +{
-+    uintptr_t t;
-+    __asm__ volatile("movq %%fs:0, %0" : "=r"(t));
-+    return t;
-+}
-+
-+static inline unsigned rf_slot(uintptr_t t)
-+{
-+    return (unsigned)(((uint64_t)t * 0x9E3779B97F4A7C15ull) >> 56) & (RF_SLOTS - 1);
-+}
-+
-+static int rf_tcb_sane(void)
-+{
-+    const uintptr_t t = rf_tcb();
-+    return t != 0 && *(volatile uintptr_t *)t == t;
++    uintptr_t sp;
++    __asm__("movq %%rsp, %0" : "=r"(sp));
++    return sp >> 12;
 +}
 +
 +RecompRegFile *recomp_regfile(void)
 +{
-+    if (__atomic_load_n(&s_rf_ok, __ATOMIC_RELAXED) <= 0) {
-+        if (s_rf_ok < 0) {
-+            s_rf_ok = rf_tcb_sane();
-+            fprintf(stderr, "  [REGFILE] thread control block %s: %s\n",
-+                    s_rf_ok ? "points at itself" : "does not point at itself",
-+                    s_rf_ok ? "register blocks cached by it" : "emulated TLS every time");
-+        }
-+        if (s_rf_ok <= 0) return &s_regfile;
-+    }
-+    const uintptr_t t = rf_tcb();
-+    const unsigned i = rf_slot(t);
-+    if (__atomic_load_n(&s_rf_cache[i].tcb, __ATOMIC_ACQUIRE) == t) {
-+        RecompRegFile *rf = __atomic_load_n(&s_rf_cache[i].rf, __ATOMIC_RELAXED);
++    const uintptr_t p = rf_sp_page();
++    const unsigned i = (unsigned)p & (RF_PAGES - 1);
++    if (__atomic_load_n(&s_rf_pages[i].page, __ATOMIC_ACQUIRE) == p) {
++        RecompRegFile *rf = __atomic_load_n(&s_rf_pages[i].rf, __ATOMIC_RELAXED);
 +        __atomic_thread_fence(__ATOMIC_ACQUIRE);
-+        if (__atomic_load_n(&s_rf_cache[i].tcb, __ATOMIC_RELAXED) == t)
++        if (__atomic_load_n(&s_rf_pages[i].page, __ATOMIC_RELAXED) == p)
 +            return rf;
 +    }
-+    RecompRegFile *rf = &s_regfile;
-+    __atomic_store_n(&s_rf_cache[i].tcb, (uintptr_t)0, __ATOMIC_RELEASE);
-+    __atomic_store_n(&s_rf_cache[i].rf, rf, __ATOMIC_RELEASE);
-+    __atomic_store_n(&s_rf_cache[i].tcb, t, __ATOMIC_RELEASE);
-+    return rf;
++    return &s_regfile;
 +}
 +
-+void recomp_regfile_forget(void)
++/* The calling thread's stack: from the page of `top` (an address in the
++ * thread's first frame) down to `size` bytes below it, less a page for the
++ * frames above `top`. Entered with enter set, taken out again without. */
++void recomp_regfile_stack(uintptr_t top, size_t size, int enter)
 +{
-+    if (!rf_tcb_sane() && s_rf_ok != 0) {
-+        s_rf_ok = 0;   /* this thread's does not: no table from now on */
-+        fprintf(stderr, "  [REGFILE] a thread's control block does not point at itself: table off\n");
++    static int said;
++    const uintptr_t last = top >> 12;
++    const uintptr_t first = size > 2 * 4096 ? ((top - size) >> 12) + 2 : last;
++    RecompRegFile *rf = &s_regfile;
++    unsigned entered = 0;
++    for (uintptr_t p = first; p <= last; p++) {
++        const unsigned i = (unsigned)p & (RF_PAGES - 1);
++        if (enter) {
++            __atomic_store_n(&s_rf_pages[i].page, (uintptr_t)0, __ATOMIC_RELEASE);
++            __atomic_store_n(&s_rf_pages[i].rf, rf, __ATOMIC_RELEASE);
++            __atomic_store_n(&s_rf_pages[i].page, p, __ATOMIC_RELEASE);
++            entered++;
++        } else if (__atomic_load_n(&s_rf_pages[i].page, __ATOMIC_ACQUIRE) == p) {
++            __atomic_store_n(&s_rf_pages[i].page, (uintptr_t)0, __ATOMIC_RELEASE);
++        }
 +    }
-+    const uintptr_t t = rf_tcb();
-+    const unsigned i = rf_slot(t);
-+    if (__atomic_load_n(&s_rf_cache[i].tcb, __ATOMIC_ACQUIRE) == t)
-+        __atomic_store_n(&s_rf_cache[i].tcb, (uintptr_t)0, __ATOMIC_RELEASE);
++    if (enter && __atomic_fetch_add(&said, 1, __ATOMIC_RELAXED) < 16)
++        fprintf(stderr, "  [REGFILE] register block %p found by the stack: %u pages from %#lx\n",
++                (void *)rf, entered, (unsigned long)(first << 12));
 +}
 +#endif
  
  /* The shape of the TLS block the loader built, so a new thread can be
   * given one just like it: where the initialised image data starts, how
-@@ -959,8 +1290,12 @@ RECOMP_TLS uint32_t g_fs_base = XBOX_TIB_MAIN;
+@@ -959,8 +1280,12 @@ RECOMP_TLS uint32_t g_fs_base = XBOX_TIB_MAIN;
   * at is. Zero total means the image had no TLS directory. */
  static uint32_t g_tls_template_va, g_tls_total, g_tls_thread_size = 64;
  
@@ -1193,7 +1183,7 @@ index 99d17e7..0092cc6 100644
  
  #ifdef RECOMP_ABI_CHECK
  /* Report a lifted function that returned without restoring ebx/esi/edi.
-@@ -1105,19 +1440,37 @@ void recomp_abi_violation_log(uint32_t va, uint32_t ebx0, uint32_t esi0,
+@@ -1105,19 +1430,37 @@ void recomp_abi_violation_log(uint32_t va, uint32_t ebx0, uint32_t esi0,
  #endif
  
  /* SEH frame pointer bridge (see recomp_types.h for explanation) */
@@ -1231,7 +1221,7 @@ index 99d17e7..0092cc6 100644
  
  /* ---- non-local jumps ---------------------------------------------------
   *
-@@ -1136,7 +1489,11 @@ typedef struct {
+@@ -1136,7 +1479,11 @@ typedef struct {
  } recomp_jmp_slot;
  
  static RECOMP_TLS recomp_jmp_slot s_jmp[RECOMP_JMPBUF_SLOTS];
@@ -1243,7 +1233,7 @@ index 99d17e7..0092cc6 100644
  
  jmp_buf *recomp_setjmp_slot(uint32_t buf_va)
  {
-@@ -1301,13 +1658,23 @@ void xbox_WatchdogStart(void)
+@@ -1301,13 +1648,23 @@ void xbox_WatchdogStart(void)
  }
  
  /* SSE. 128 bits of architectural state, per-thread like the rest. */
@@ -1267,7 +1257,7 @@ index 99d17e7..0092cc6 100644
  
  /* EFLAGS.DF. Zero means the string instructions walk forwards, which is the
   * ABI's resting state and what almost every one of them does -- so this is
-@@ -1316,10 +1683,14 @@ RECOMP_TLS uint32_t g_ebp = 0;
+@@ -1316,10 +1673,14 @@ RECOMP_TLS uint32_t g_ebp = 0;
   * `std; repne scasb`, and memmove goes backwards when its regions overlap the
   * wrong way. Thread-local, because `std` and the `cld` that undoes it can land
   * in different lifted bodies of the same guest routine. */
@@ -1282,7 +1272,7 @@ index 99d17e7..0092cc6 100644
  
  /* ICALL trace ring buffer */
  volatile uint32_t g_icall_trace[16] = {0};
-@@ -1431,7 +1802,20 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -1431,7 +1792,20 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
           */
  #if !defined(_WIN32)
          {
