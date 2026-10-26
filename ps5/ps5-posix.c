@@ -1021,6 +1021,10 @@ int __wrap_lstat(const char* path, struct stat* info)
 static pthread_t g_prof_target;
 static volatile int g_prof_have, g_prof_on, g_prof_started;
 static struct { uintptr_t pc; uint32_t n; } g_prof_hist[PROF_SLOTS];
+/* Samples in the system's libraries (from 0x800000000), counted by the first return address on the stack that is in
+ * the game's own code: who called into them. */
+static struct { uintptr_t pc; uint32_t n; } g_prof_callers[PROF_SLOTS];
+static volatile uint32_t g_prof_sys;
 static volatile uint32_t g_prof_total, g_prof_lost;
 
 void jsrf_ps5_render_thread(void)
@@ -1036,6 +1040,22 @@ static void prof_sample(int signal_number, siginfo_t* info, void* context)
 	const uintptr_t pc = (uintptr_t)((const ucontext_t*)context)->uc_mcontext.mc_rip;
 	uint32_t h = (uint32_t)((pc >> 2) * 2654435761u) & (PROF_SLOTS - 1);
 	g_prof_total++;
+	if (pc >= 0x800000000ull) {
+		const uintptr_t* sp = (const uintptr_t*)(uintptr_t)((const ucontext_t*)context)->uc_mcontext.mc_rsp;
+		uintptr_t caller = 0;
+		for (int i = 0; i < 64 && sp; i++)
+			if (is_game_code((const char*)sp[i])) { caller = sp[i]; break; }
+		g_prof_sys++;
+		uint32_t c = (uint32_t)((caller >> 2) * 2654435761u) & (PROF_SLOTS - 1);
+		for (int i = 0; i < 16; i++) {
+			uint32_t k = (c + (uint32_t)i) & (PROF_SLOTS - 1);
+			if (g_prof_callers[k].pc == caller || g_prof_callers[k].pc == 0) {
+				g_prof_callers[k].pc = caller;
+				g_prof_callers[k].n++;
+				break;
+			}
+		}
+	}
 	for (int i = 0; i < 16; i++) {
 		uint32_t k = (h + (uint32_t)i) & (PROF_SLOTS - 1);
 		if (g_prof_hist[k].pc == pc || g_prof_hist[k].pc == 0) {
@@ -1072,8 +1092,22 @@ static void* prof_thread(void* unused)
 		fprintf(stderr, "  [PROF] %u samples of the render thread (%u not placed); the most counted:\n", total, lost);
 		for (int j = 0; j < 40 && top[j].n; j++)
 			fprintf(stderr, "  [PROF] %p %u %.1f%%\n", (void*)top[j].pc, top[j].n, 100.0 * top[j].n / total);
+		/* who called into the system's libraries, the 20 counted most */
+		memset(top, 0, sizeof top);
+		for (int k = 0; k < PROF_SLOTS; k++) {
+			const uint32_t n = g_prof_callers[k].n;
+			if (n <= top[19].n) continue;
+			int j = 19;
+			while (j > 0 && top[j - 1].n < n) { top[j] = top[j - 1]; j--; }
+			top[j].pc = g_prof_callers[k].pc;
+			top[j].n = n;
+		}
+		fprintf(stderr, "  [PROF] %u of them in the system's libraries, called from:\n", g_prof_sys);
+		for (int j = 0; j < 20 && top[j].n; j++)
+			fprintf(stderr, "  [PROF] caller %p %u %.1f%%\n", (void*)top[j].pc, top[j].n, 100.0 * top[j].n / total);
 		memset(g_prof_hist, 0, sizeof g_prof_hist);
-		g_prof_total = g_prof_lost = 0;
+		memset(g_prof_callers, 0, sizeof g_prof_callers);
+		g_prof_total = g_prof_lost = g_prof_sys = 0;
 	}
 	return NULL;
 }
