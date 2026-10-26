@@ -1154,10 +1154,10 @@ index 20c9273..1f32680 100644
              g_is_gl = 0;
 diff --git a/src/nv2a_vk/nv2a_vk.c b/src/nv2a_vk/nv2a_vk.c
 new file mode 100644
-index 0000000..2b4442f
+index 0000000..1df9928
 --- /dev/null
 +++ b/src/nv2a_vk/nv2a_vk.c
-@@ -0,0 +1,2565 @@
+@@ -0,0 +1,2791 @@
 +/*
 + * The NV2A renderer's device on Vulkan (nv2a_backend.h): the third backend,
 + * beside OpenGL (nv2a_gl/nv2a_gfx_gl.c) and Metal (nv2a_metal/nv2a_metal.m).
@@ -1264,6 +1264,7 @@ index 0000000..2b4442f
 +	VkSampler sampler;
 +	uint32_t w, h, levels;
 +	uint8_t used, is_target;
++	Nv2aSampler smp;                   /* as it was made, for the frame capture */
 +} VkTex;
 +
 +typedef struct {
@@ -1286,6 +1287,7 @@ index 0000000..2b4442f
 +	uint32_t ring_v, ring_f;           /* this frame's copies of the blocks */
 +	uint64_t ring_stamp_v, ring_stamp_f;
 +	uint8_t dirty_v, dirty_f, used;
++	char *src_v, *src_f;               /* the Vulkan GLSL it was made from, for the frame capture */
 +} VkProg;
 +
 +typedef struct {
@@ -1324,7 +1326,7 @@ index 0000000..2b4442f
 + *   NOCULL   no face culling;
 + *   TRACE    the surface trace below.
 + */
-+enum { JSRF_VK_RESOLVE = 1, JSRF_VK_ALPHA1 = 2, JSRF_VK_NOCULL = 4, JSRF_VK_TRACE = 8 };
++enum { JSRF_VK_RESOLVE = 1, JSRF_VK_ALPHA1 = 2, JSRF_VK_NOCULL = 4, JSRF_VK_TRACE = 8, JSRF_VK_CAPTURE = 16 };
 +uint32_t jsrf_vk_modes;
 +void jsrf_ps5_frame_hook(void) __attribute__((weak)); /* once a frame, from present */
 +static uint32_t g_ovl;                                /* the indicator's texture, 0 for none */
@@ -1336,6 +1338,11 @@ index 0000000..2b4442f
 +static void trace_clear(unsigned mask, const float rgba[4], const uint32_t rect[4]);
 +static void trace_draw(int prim, uint32_t count);
 +static void trace_frame_done(int slot);
++static void capture_draw(int prim, uint32_t count);
++static const char *g_drop; /* why the last draw was not made, or NULL (the frame capture says) */
++static uint64_t n_dropped;
++static void capture_present(uint32_t rt);
++static void capture_frame_done(int slot);
 +
 +static VkInstance g_instance;
 +static VkPhysicalDevice g_phys;
@@ -1534,6 +1541,7 @@ index 0000000..2b4442f
 +	Frame *f = &g_fr[g_slot];
 +	vkWaitForFences(g_dev, 1, &f->done, VK_TRUE, UINT64_MAX);
 +	trace_frame_done(g_slot);
++	capture_frame_done(g_slot);
 +	bury(f);
 +	for (int i = 0; i < f->npools; i++)
 +		vkResetDescriptorPool(g_dev, f->pools[i], 0);
@@ -1705,6 +1713,7 @@ index 0000000..2b4442f
 +	t->w = w;
 +	t->h = h;
 +	t->levels = levels;
++	t->smp = *s;
 +	t->sampler = sampler_for(s);
 +	t->used = 1;
 +
@@ -2337,9 +2346,12 @@ index 0000000..2b4442f
 +	}
 +	p->vs = compile_stage(vs, GLSLANG_STAGE_VERTEX, what ? what : "program");
 +	p->fs = p->vs ? compile_stage(fs, GLSLANG_STAGE_FRAGMENT, what ? what : "program") : VK_NULL_HANDLE;
-+	free(vs);
-+	free(fs);
++	p->src_v = vs; /* kept for the frame capture; freed with the program */
++	p->src_f = fs;
 +	if (!p->vs || !p->fs) {
++		free(p->src_v);
++		free(p->src_f);
++		p->src_v = p->src_f = NULL;
 +		if (p->vs) vkDestroyShaderModule(g_dev, p->vs, NULL);
 +		g_failed[hash % FAILED_SLOTS] = hash;
 +		return 0;
@@ -2369,6 +2381,9 @@ index 0000000..2b4442f
 +	defer(DEAD_MODULE, (uint64_t)p->fs);
 +	free(p->vu);
 +	free(p->fu);
++	free(p->src_v);
++	free(p->src_f);
++	p->src_v = p->src_f = NULL;
 +	p->used = 0;
 +	if (g_cur_prog == h)
 +		g_cur_prog = 0;
@@ -3027,6 +3042,210 @@ index 0000000..2b4442f
 +	}
 +}
 +
++/*
++ * The frame capture (decision log D41, the CAPTURE FRAME mode): one frame, from the present after the mode is switched
++ * on to the next, written to /app0/vkcap: every draw into the log (made or dropped and why, its program, textures and
++ * their sampling, blend, masks, alpha test, depth, stencil, culling, scissor), each texture it samples as a small BMP,
++ * each program's Vulkan GLSL, and the frame as shown. Then the mode switches itself off. At most 3 captures a run.
++ */
++#define CAP_TEX 48
++#define CAP_BYTES (160u << 20)
++static struct {
++	int state;                 /* 0 off, 1 armed (from the next present), 2 capturing */
++	int n, slot, pending;
++	uint32_t draws;
++	VkBuffer buf;
++	VkDeviceMemory mem;
++	uint8_t *map;
++	uint32_t used;
++	struct { uint32_t tex, w, h, at; } tex[CAP_TEX];
++	uint32_t ntex;
++	uint32_t frame_w, frame_h, frame_at;
++	uint8_t prog_seen[MAX_PROG];
++} g_cap;
++
++static void cap_bmp(const char *name, const uint8_t *rgba, uint32_t w, uint32_t h, uint32_t maxw)
++{
++	uint32_t step = (w + maxw - 1) / maxw, ow = w / step, oh = h / step;
++	if (!ow || !oh)
++		return;
++	FILE *fp = fopen(name, "wb");
++	if (!fp)
++		return;
++	uint32_t rowb = (ow * 3 + 3) & ~3u, size = 54 + rowb * oh, v;
++	uint8_t hd[54] = {'B', 'M'};
++	memcpy(hd + 2, &size, 4);
++	v = 54; memcpy(hd + 10, &v, 4);
++	v = 40; memcpy(hd + 14, &v, 4);
++	memcpy(hd + 18, &ow, 4);
++	memcpy(hd + 22, &oh, 4);
++	uint16_t planes = 1, bits = 24; memcpy(hd + 26, &planes, 2); memcpy(hd + 28, &bits, 2);
++	fwrite(hd, 1, 54, fp);
++	uint8_t *line = calloc(1, rowb);
++	for (uint32_t y = 0; y < oh && line; y++) {
++		const uint8_t *src = rgba + (size_t)((oh - 1 - y) * step) * w * 4;
++		for (uint32_t x = 0; x < ow; x++) {
++			const uint8_t *px = src + (size_t)x * step * 4;
++			line[x * 3 + 0] = px[2];
++			line[x * 3 + 1] = px[1];
++			line[x * 3 + 2] = px[0];
++		}
++		fwrite(line, 1, rowb, fp);
++	}
++	free(line);
++	fclose(fp);
++}
++
++/* Level 0 of a texture into the capture buffer, in the command stream. */
++static int cap_copy_tex(uint32_t hnd)
++{
++	VkTex *t = &g_tex[hnd - 1];
++	uint32_t bytes = t->w * t->h * 4;
++	if (g_cap.ntex >= CAP_TEX || g_cap.used + bytes > CAP_BYTES)
++		return 0;
++	uint32_t keep = g_cur_rt;
++	pass_end();
++	VkCommandBuffer c = cmd();
++	barrier_all(c);
++	VkImageLayout l = t->is_target ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
++	if (!t->is_target)
++		image_layout(c, t->image, VK_IMAGE_ASPECT_COLOR_BIT, t->levels, l, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
++	VkBufferImageCopy r = {.bufferOffset = g_cap.used, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
++	                       .imageExtent = {t->w, t->h, 1}};
++	vkCmdCopyImageToBuffer(c, t->image, t->is_target ? l : VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, g_cap.buf, 1, &r);
++	if (!t->is_target)
++		image_layout(c, t->image, VK_IMAGE_ASPECT_COLOR_BIT, t->levels, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, l);
++	barrier_all(c);
++	g_cur_rt = keep;
++	g_cap.tex[g_cap.ntex++] = (typeof(g_cap.tex[0])){hnd, t->w, t->h, g_cap.used};
++	g_cap.used += bytes;
++	return 1;
++}
++
++static void capture_draw(int prim, uint32_t count)
++{
++	if (g_cap.state != 2)
++		return;
++	uint32_t d = g_cap.draws++;
++	if (d >= 3000)
++		return;
++	char texs[256] = "";
++	size_t at = 0;
++	uint32_t smp = prog_ok(g_cur_prog) ? g_prog[g_cur_prog - 1].samplers : 0;
++	for (int u = 0; u < 4; u++) {
++		if (!((smp >> u) & 1))
++			continue;
++		uint32_t h = g_bound[u];
++		if (!tex_ok(h)) {
++			at += (size_t)snprintf(texs + at, sizeof texs - at, " u%d:none", u);
++			continue;
++		}
++		VkTex *t = &g_tex[h - 1];
++		uint32_t i;
++		for (i = 0; i < g_cap.ntex && g_cap.tex[i].tex != h; i++)
++			;
++		if (i == g_cap.ntex)
++			cap_copy_tex(h);
++		at += (size_t)snprintf(texs + at, sizeof texs - at, " u%d:t%u%s %ux%u l%u mag%u min%u mip%u wrap%u%u", u, h,
++		                       t->is_target ? "(target)" : "", t->w, t->h, t->levels, t->smp.mag_linear,
++		                       t->smp.min_linear, t->smp.mip, t->smp.wrap_s, t->smp.wrap_t);
++		if (at >= sizeof texs)
++			at = sizeof texs - 1;
++	}
++	int af = -1;
++	float aref = 0;
++	if (prog_ok(g_cur_prog)) {
++		VkProg *p = &g_prog[g_cur_prog - 1];
++		int32_t o = p->off[1][NV2A_U_ALPHAFUNC], o2 = p->off[1][NV2A_U_ALPHAREF];
++		if (o >= 0) memcpy(&af, p->fu + o, 4);
++		if (o2 >= 0) memcpy(&aref, p->fu + o2, 4);
++		if (!g_cap.prog_seen[g_cur_prog - 1] && p->src_v && p->src_f) {
++			char name[64];
++			g_cap.prog_seen[g_cur_prog - 1] = 1;
++			snprintf(name, sizeof name, "/app0/vkcap/c%d_p%u.vert", g_cap.n, g_cur_prog);
++			FILE *fp = fopen(name, "w");
++			if (fp) { fputs(p->src_v, fp); fclose(fp); }
++			snprintf(name, sizeof name, "/app0/vkcap/c%d_p%u.frag", g_cap.n, g_cur_prog);
++			fp = fopen(name, "w");
++			if (fp) { fputs(p->src_f, fp); fclose(fp); }
++		}
++	}
++	fprintf(stderr, "  [CAP] d%u %s rt%u p%u prim%d n%u |%s | blend %d %x/%x cm %08x atest %d %.3f | z %d/%d f%x | "
++	                "st %d f%x ref%u ops %x/%x/%x | cull %d %x %x | sc %d %u,%u-%u,%u\n",
++	        d, g_drop ? g_drop : "drawn", g_cur_rt, g_cur_prog, prim, count, texs, g_rs.blend_enable, g_rs.blend_src,
++	        g_rs.blend_dst, g_rs.color_mask, af, aref, g_rs.depth_test, g_rs.depth_write, g_rs.depth_func,
++	        g_rs.stencil_test, g_rs.stencil_func, g_rs.stencil_ref, g_rs.stencil_op[0], g_rs.stencil_op[1],
++	        g_rs.stencil_op[2], g_rs.cull_enable, g_rs.cull_face, g_rs.front_face, g_rs.scissor_enable,
++	        g_rs.scissor[0], g_rs.scissor[1], g_rs.scissor[2], g_rs.scissor[3]);
++}
++
++/* At each present: arm, start, or finish (the shown target copied out) a capture. */
++static void capture_present(uint32_t rt)
++{
++	if (g_cap.state == 0 && (jsrf_vk_modes & JSRF_VK_CAPTURE)) {
++		if (g_cap.n >= 3 || g_cap.pending) {
++			jsrf_vk_modes &= ~(uint32_t)JSRF_VK_CAPTURE;
++			return;
++		}
++		if (!g_cap.buf && !host_buffer(CAP_BYTES, VK_BUFFER_USAGE_TRANSFER_DST_BIT, &g_cap.buf, &g_cap.mem, &g_cap.map)) {
++			LOG("capture: no buffer\n");
++			jsrf_vk_modes &= ~(uint32_t)JSRF_VK_CAPTURE;
++			return;
++		}
++		mkdir("/app0/vkcap", 0777);
++		g_cap.state = 2;
++		g_cap.draws = g_cap.ntex = g_cap.used = 0;
++		memset(g_cap.prog_seen, 0, sizeof g_cap.prog_seen);
++		LOG("capture %d: from frame %llu\n", g_cap.n, (unsigned long long)n_frames + 1);
++		return;
++	}
++	if (g_cap.state != 2)
++		return;
++	if (rt_ok(rt)) {
++		VkRT *r = &g_rt[rt - 1];
++		uint32_t bytes = r->pw * r->ph * 4;
++		if (g_cap.used + bytes <= CAP_BYTES) {
++			pass_end();
++			VkCommandBuffer c = cmd();
++			barrier_all(c);
++			VkBufferImageCopy cr = {.bufferOffset = g_cap.used,
++			                        .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
++			                        .imageExtent = {r->pw, r->ph, 1}};
++			vkCmdCopyImageToBuffer(c, g_tex[r->color - 1].image, VK_IMAGE_LAYOUT_GENERAL, g_cap.buf, 1, &cr);
++			barrier_all(c);
++			g_cap.frame_w = r->pw;
++			g_cap.frame_h = r->ph;
++			g_cap.frame_at = g_cap.used;
++			g_cap.used += bytes;
++		}
++	}
++	LOG("capture %d: %u draws (%llu dropped so far in the run), %u textures\n", g_cap.n, g_cap.draws,
++	    (unsigned long long)n_dropped, g_cap.ntex);
++	g_cap.state = 0;
++	g_cap.pending = 1;
++	g_cap.slot = g_slot;
++	jsrf_vk_modes &= ~(uint32_t)JSRF_VK_CAPTURE;
++}
++
++static void capture_frame_done(int slot)
++{
++	if (!g_cap.pending || g_cap.slot != slot)
++		return;
++	char name[64];
++	for (uint32_t i = 0; i < g_cap.ntex; i++) {
++		snprintf(name, sizeof name, "/app0/vkcap/c%d_t%u.bmp", g_cap.n, g_cap.tex[i].tex);
++		cap_bmp(name, g_cap.map + g_cap.tex[i].at, g_cap.tex[i].w, g_cap.tex[i].h, 128);
++	}
++	if (g_cap.frame_w) {
++		snprintf(name, sizeof name, "/app0/vkcap/c%d_frame.bmp", g_cap.n);
++		cap_bmp(name, g_cap.map + g_cap.frame_at, g_cap.frame_w, g_cap.frame_h, 960);
++	}
++	LOG("capture %d written to /app0/vkcap\n", g_cap.n);
++	g_cap.frame_w = 0;
++	g_cap.pending = 0;
++	g_cap.n++;
++}
++
 +/* Where a frame's time goes (V3), in TSC ticks: the front half's method handling (nv2a_pb_exec.c), the part of it in
 + * this backend's draws and vertices, and present's waits (the swapchain image and the frame slot's fence). */
 +uint64_t jsrf_tsc_front;
@@ -3150,7 +3369,11 @@ index 0000000..2b4442f
 +static void vk_draw(int prim, uint32_t count)
 +{
 +	uint64_t t0 = TSC_NOW();
++	g_drop = NULL;
 +	vk_draw_body(prim, count);
++	if (g_drop)
++		n_dropped++;
++	capture_draw(prim, count);
 +	tsc_backend += TSC_NOW() - t0;
 +}
 +
@@ -3162,35 +3385,36 @@ index 0000000..2b4442f
 +		nocull = v && *v && *v != '0';
 +	}
 +	if (!count || !rt_ok(g_cur_rt) || !prog_ok(g_cur_prog) || !g_have_verts)
-+		return;
++		{ g_drop = !count ? "no vertices" : !rt_ok(g_cur_rt) ? "no target" : !prog_ok(g_cur_prog) ? "no program"
++		                                                                                    : "vertices not given"; return; }
 +	nocull = (nocull & 1) | ((jsrf_vk_modes & JSRF_VK_NOCULL) ? 2 : 0);
 +	if (prim >= NV2A_PRIM_TRIANGLES && g_rs.cull_enable && g_rs.cull_face == 0x408 && !nocull)
-+		return; /* front and back culled */
++		{ g_drop = "both faces culled"; return; } /* front and back culled */
 +	if (prim == NV2A_PRIM_TRIANGLE_FAN && count < 3)
-+		return;
++		{ g_drop = "if (prim == NV2A_PRIM_TRIANGLE_FAN && count < 3)"; return; }
 +	VkProg *p = &g_prog[g_cur_prog - 1];
 +	uint32_t ov, of;
 +	/* the ring first: a full one submits the work so far, and the pass with it */
 +	if (!uniforms_ready(p, &ov, &of))
-+		return;
++		{ g_drop = "if (!uniforms_ready(p, &ov, &of))"; return; }
 +	uint32_t loop_at = 0;
 +	if (prim == NV2A_PRIM_LINE_LOOP) {
 +		uint32_t *ix;
 +		loop_at = ring_alloc((count + 1) * 4, (void **)&ix);
-+		if (loop_at == UINT32_MAX) return;
++		if (loop_at == UINT32_MAX) { g_drop = "if (loop_at == UINT32_MAX) return;"; return; }
 +		for (uint32_t i = 0; i < count; i++) ix[i] = i;
 +		ix[count] = 0;
 +	}
 +	if (!g_have_verts || !uniforms_ready(p, &ov, &of)) /* again, in case the ring started over */
-+		return;
++		{ g_drop = "if (!g_have_verts || !uniforms_ready(p, &ov, &of)) /* again,"; return; }
 +	VkDescriptorSet set = descriptor_set();
 +	if (!set)
-+		return;
++		{ g_drop = "if (!set)"; return; }
 +	VkPipeline pipe = pipeline_for(prim);
 +	if (!pipe)
-+		return;
++		{ g_drop = "if (!pipe)"; return; }
 +	if (!pass_begin())
-+		return;
++		{ g_drop = "if (!pass_begin())"; return; }
 +	VkCommandBuffer c = cmd();
 +	VkRT *rt = &g_rt[g_cur_rt - 1];
 +	if (!E.valid || E.pipe != pipe) {
@@ -3249,7 +3473,7 @@ index 0000000..2b4442f
 +		sc = (VkRect2D){{(int32_t)x0, (int32_t)y0}, {x1 - x0, y1 - y0}};
 +	}
 +	if (!sc.extent.width || !sc.extent.height)
-+		return;
++		{ g_drop = "empty scissor"; return; }
 +	if (!E.valid || memcmp(&E.sc, &sc, sizeof sc)) {
 +		vkCmdSetScissor(c, 0, 1, &sc);
 +		E.sc = sc;
@@ -3319,6 +3543,7 @@ index 0000000..2b4442f
 +{
 +	if (jsrf_ps5_frame_hook)
 +		jsrf_ps5_frame_hook();
++	capture_present(h);
 +	Frame *f = &g_fr[g_slot];
 +	uint32_t img = 0;
 +	pass_end();
@@ -3421,7 +3646,8 @@ index 0000000..2b4442f
 +		last_v = tsc_backend_v;
 +		last_wait = tsc_wait;
 +	}
-+	LOG("modes %x: %llu targets resolved before sampling\n", jsrf_vk_modes, (unsigned long long)n_resolves);
++	LOG("modes %x: %llu targets resolved before sampling; %llu draws dropped\n", jsrf_vk_modes,
++	    (unsigned long long)n_resolves, (unsigned long long)n_dropped);
 +	if (n_tex_gone || n_tex_none)
 +		LOG("black in place of a texture: %llu draws whose texture was gone, %llu with none bound\n",
 +		    (unsigned long long)n_tex_gone, (unsigned long long)n_tex_none);

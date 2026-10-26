@@ -227,6 +227,7 @@ int scePadReadState(int handle, mode_pad_state *data);
 enum { MP_UP = 0x10, MP_RIGHT = 0x20, MP_DOWN = 0x40, MP_LEFT = 0x80, MP_CROSS = 0x4000, MP_TOUCH = 0x100000 };
 static const struct { uint32_t bit; const char *name; } kModes[] = {
 	{1, "RESOLVE BEFORE SAMPLING"}, {2, "NEW TARGETS ALPHA 1"}, {4, "NO CULLING"}, {8, "SURFACE TRACE"},
+	{16, "CAPTURE FRAME"},
 };
 enum { N_MODES = sizeof kModes / sizeof kModes[0], OVL_W = 384, OVL_H = 6 + 18 * (N_MODES + 1) + 4 };
 

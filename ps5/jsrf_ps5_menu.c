@@ -177,7 +177,7 @@ void jsrf_ps5_menu_prepare(const char *settings)
 		setenv("RADV_DEBUG", kDrivers[g_driver].radv, 1);
 	{
 		extern uint32_t jsrf_vk_modes;
-		jsrf_vk_modes = (uint32_t)cfg_get(settings, "vk_modes", 8);
+		jsrf_vk_modes = (uint32_t)cfg_get(settings, "vk_modes", 0);
 	}
 #endif
 	g_scale = cfg_get(settings, "scale", 4);
