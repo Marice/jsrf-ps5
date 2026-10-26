@@ -8,6 +8,9 @@ set(NV2A_GL_CONTEXT "sdl" CACHE STRING "" FORCE)
 set(JSRF_PS5 ON)
 add_compile_definitions(JSRF_PS5=1)
 add_compile_options(-Wno-unused-command-line-argument)
+# The guest's registers in one thread-local block (src-upstream/src/platform/recomp_regfile.h, decision log D46):
+# before every source's own includes, so recomp_types.h and xbox_memory_layout.h see RECOMP_REGFILE.
+add_compile_options("SHELL:-include ${CMAKE_CURRENT_SOURCE_DIR}/src-upstream/src/platform/recomp_regfile.h")
 if(JSRF_PS5_VULKAN)
   # Mihawk's RADV instead of the OpenGL SDK (ps5/ps5-vk.cmake, decision log D34): upstream's renderer without its
   # OpenGL device, and our pthread_create and fflush ahead of the platform layer's wraps of the same names.
