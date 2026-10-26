@@ -1154,10 +1154,10 @@ index 20c9273..1f32680 100644
              g_is_gl = 0;
 diff --git a/src/nv2a_vk/nv2a_vk.c b/src/nv2a_vk/nv2a_vk.c
 new file mode 100644
-index 0000000..e8ee01d
+index 0000000..66b8cce
 --- /dev/null
 +++ b/src/nv2a_vk/nv2a_vk.c
-@@ -0,0 +1,2807 @@
+@@ -0,0 +1,2828 @@
 +/*
 + * The NV2A renderer's device on Vulkan (nv2a_backend.h): the third backend,
 + * beside OpenGL (nv2a_gl/nv2a_gfx_gl.c) and Metal (nv2a_metal/nv2a_metal.m).
@@ -3184,6 +3184,27 @@ index 0000000..e8ee01d
 +			snprintf(name, sizeof name, "/app0/vkcap/c%d_p%u.frag", g_cap.n, g_cur_prog);
 +			fp = fopen(name, "w");
 +			if (fp) { fputs(p->src_f, fp); fclose(fp); }
++		}
++	}
++	/* The draw's inputs, for working its shaders through off the console: the program's blocks as they were copied
++	 * for this draw, the constant attributes, the layout and the first 16 vertices. */
++	if (prog_ok(g_cur_prog) && d < 400) {
++		char name[64];
++		snprintf(name, sizeof name, "/app0/vkcap/c%d_d%u.bin", g_cap.n, d);
++		FILE *fp = fopen(name, "wb");
++		if (fp) {
++			VkProg *p = &g_prog[g_cur_prog - 1];
++			uint32_t nv = count < 16 ? count : 16, hd[24] = {0x31504143u /* CAP1 */, g_cur_prog, p->vu_size, p->fu_size,
++			                                                  g_vb_stride, nv};
++			for (int i = 0; i < 16; i++)
++				hd[6 + i] = (uint32_t)(int32_t)g_vb_at[i];
++			fwrite(hd, 4, 24, fp);
++			fwrite(p->vu, 1, p->vu_size, fp);
++			fwrite(p->fu, 1, p->fu_size, fp);
++			fwrite(g_generic, 1, sizeof g_generic, fp);
++			if (g_vb_stride && nv)
++				fwrite(g_fr[g_slot].ring_map + g_vb_off, 4, (size_t)g_vb_stride * nv, fp);
++			fclose(fp);
 +		}
 +	}
 +	fprintf(stderr, "  [CAP] d%u %s rt%u p%u prim%d n%u |%s | blend %d %x/%x cm %08x atest %d %.3f | z %d/%d f%x | "
