@@ -90,3 +90,111 @@ int nv_window_pref_widescreen(void)
 {
 	return 1;
 }
+
+/* Imports that only libScePosixForWebKit's stub defines, whose entries a title gets as null (as radv-link.sh notes
+ * for strcasestr): the first console run of this build called fnmatch through 0 in NtQueryDirectoryFile (D34). The
+ * OpenGL SDK carried its own; these are ours. */
+#include <ctype.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <fnmatch.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+static int fold(int c, int flags)
+{
+	return (flags & FNM_CASEFOLD) ? tolower((unsigned char)c) : (unsigned char)c;
+}
+
+/* One bracket expression at *p against c; *p moves past it. -1 when the bracket is not closed (then '[' is literal). */
+static int match_bracket(const char **p, int c, int flags)
+{
+	const char *s = *p + 1;
+	int negate = 0, hit = 0;
+	if (*s == '!' || *s == '^') { negate = 1; s++; }
+	const char *first = s;
+	while (*s && (*s != ']' || s == first)) {
+		int lo = *s, hi;
+		if (lo == '\\' && !(flags & FNM_NOESCAPE) && s[1]) lo = *++s;
+		s++;
+		hi = lo;
+		if (*s == '-' && s[1] && s[1] != ']') {
+			s++;
+			hi = *s;
+			if (hi == '\\' && !(flags & FNM_NOESCAPE) && s[1]) hi = *++s;
+			s++;
+		}
+		if (fold(lo, flags) <= fold(c, flags) && fold(c, flags) <= fold(hi, flags)) hit = 1;
+	}
+	if (*s != ']') return -1;
+	*p = s + 1;
+	return hit != negate;
+}
+
+static int match_here(const char *p, const char *s, const char *start, int flags)
+{
+	for (;;) {
+		int c = *p;
+		if (c == '\0') return *s == '\0';
+		if (*s == '.' && (flags & FNM_PERIOD) &&
+		    (s == start || ((flags & FNM_PATHNAME) && s[-1] == '/')) && c != '.')
+			return 0;
+		if (c == '*') {
+			while (*p == '*') p++;
+			if (*p == '\0') return !(flags & FNM_PATHNAME) || strchr(s, '/') == NULL;
+			for (; *s; s++) {
+				if (match_here(p, s, start, flags & ~FNM_PERIOD)) return 1;
+				if (*s == '/' && (flags & FNM_PATHNAME)) return 0;
+			}
+			return match_here(p, s, start, flags);
+		}
+		if (*s == '\0') return 0;
+		if (c == '?') {
+			if (*s == '/' && (flags & FNM_PATHNAME)) return 0;
+			p++;
+			s++;
+			continue;
+		}
+		if (c == '[' && !(*s == '/' && (flags & FNM_PATHNAME))) {
+			const char *q = p;
+			int r = match_bracket(&q, *s, flags);
+			if (r == 0) return 0;
+			if (r == 1) { p = q; s++; continue; }
+		}
+		if (c == '\\' && !(flags & FNM_NOESCAPE) && p[1]) c = *++p;
+		if (fold(c, flags) != fold(*s, flags)) return 0;
+		p++;
+		s++;
+	}
+}
+
+int fnmatch(const char *pattern, const char *string, int flags)
+{
+	return match_here(pattern, string, string, flags) ? 0 : FNM_NOMATCH;
+}
+
+char *strcasestr(const char *haystack, const char *needle)
+{
+	size_t n = strlen(needle);
+	for (; *haystack; haystack++)
+		if (strncasecmp(haystack, needle, n) == 0) return (char *)haystack;
+	return n == 0 ? (char *)haystack : NULL;
+}
+
+int mkstemp(char *template)
+{
+	static const char letters[] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+	size_t len = strlen(template);
+	if (len < 6 || strcmp(template + len - 6, "XXXXXX") != 0) {
+		errno = EINVAL;
+		return -1;
+	}
+	for (int attempt = 0; attempt < 100; attempt++) {
+		for (int i = 0; i < 6; i++) template[len - 6 + i] = letters[arc4random_uniform(sizeof letters - 1)];
+		int fd = open(template, O_RDWR | O_CREAT | O_EXCL, 0600);
+		if (fd >= 0 || errno != EEXIST) return fd;
+	}
+	errno = EEXIST;
+	return -1;
+}
