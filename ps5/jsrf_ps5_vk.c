@@ -20,9 +20,36 @@ int jsrf_ps5_gl_prepare(void)
 }
 
 /* The start menu (D35) needs the screen: until V2 the game starts with the settings file as it is. */
+#include <stdlib.h>
+#include <string.h>
+
+static int setting(const char *path, const char *key, int def)
+{
+	char line[128];
+	size_t kl = strlen(key);
+	int v = def;
+	FILE *f = fopen(path, "r");
+	if (!f)
+		return def;
+	while (fgets(line, sizeof line, f))
+		if (!strncmp(line, key, kl) && line[kl] == '=')
+			v = atoi(line + kl + 1);
+	fclose(f);
+	return v;
+}
+
+/* The kept scale and widescreen into the engine's own variables: in the OpenGL build its SDL window reads the
+ * settings file, which this build does not have (nv2a_gl.c, RECOMP_GL_SCALE and RECOMP_WIDESCREEN). */
 void jsrf_ps5_menu_prepare(const char *settings)
 {
-	(void)settings;
+	char v[16];
+	int scale = setting(settings, "scale", 4), wide = setting(settings, "widescreen", 1);
+	if (scale < 1 || scale > 4)
+		scale = 4;
+	snprintf(v, sizeof v, "%d", scale);
+	setenv("RECOMP_GL_SCALE", v, 1);
+	setenv("RECOMP_WIDESCREEN", wide ? "1" : "0", 1);
+	fprintf(stderr, "jsrf: Vulkan build: scale %d, widescreen %s (settings)\n", scale, wide ? "on" : "off");
 }
 
 void jsrf_ps5_menu(const char *settings)
@@ -208,4 +235,15 @@ int mkstemp(char *template)
 	}
 	errno = EEXIST;
 	return -1;
+}
+
+/* Anti-aliasing as the window would have it: off (the Vulkan device has neither SMAA nor MSAA yet). */
+int nv_window_pref_smaa(void)
+{
+	return 0;
+}
+
+int nv_window_pref_msaa(void)
+{
+	return 0;
 }

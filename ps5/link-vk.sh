@@ -36,6 +36,9 @@ for arg in "$@"; do
 done
 # As the OpenGL build: curl's group (ps5-gl.cmake), which OpenSSL comes with.
 for lib in libcurl libpsl libzstd libssl libcrypto; do inputs+=("$PACBREW/lib/$lib.a"); done
+# glslang, built for the PS5 in build-vk/glslang (the phase 0 spike's, D32): the Vulkan device compiles its shaders.
+glslang="$here/../build-vk/glslang/glslang"
+inputs+=("$glslang/libglslang.a" "$glslang/libglslang-default-resource-limits.a")
 
 cc -std=c++20 -O2 -fno-exceptions -fno-rtti -c "$native/app_crt.cpp" -o "$work/obj/app_crt.o"
 cc -std=c++20 -O2 -fno-exceptions -fno-rtti -c "$native/app_cpp_runtime.cpp" -o "$work/obj/app_cpp_runtime.o"

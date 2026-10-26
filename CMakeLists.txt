@@ -13,6 +13,9 @@ if(JSRF_PS5_VULKAN)
   # OpenGL device, and our pthread_create and fflush ahead of the platform layer's wraps of the same names.
   add_compile_definitions(JSRF_PS5_RADV=1 pthread_create=jsrf_pthread_create fflush=jsrf_fflush)
   set(NV2A_GL_CONTEXT "none" CACHE STRING "" FORCE)
+  # The Vulkan device (src/nv2a_vk): Vulkan's headers from Mihawk's Mesa, glslang's from the source built for the
+  # PS5 in build-vk/glslang (the phase 0 spike's, D32; ps5/link-vk.sh links it).
+  set(NV2A_VK_INCLUDE_DIRS "${CMAKE_SOURCE_DIR}/../rush2-ps5/radv/PS5_Mesa/include;${CMAKE_SOURCE_DIR}/.deps/glslang;${CMAKE_SOURCE_DIR}/build-vk/glslang/include" CACHE STRING "" FORCE)
 endif()
 
 # pthreads are in the PS5's libc and libkernel: FindThreads (src/platform) is told so.
