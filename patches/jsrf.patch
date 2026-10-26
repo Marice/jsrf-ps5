@@ -1680,10 +1680,10 @@ index 20c9273..1f32680 100644
              g_is_gl = 0;
 diff --git a/src/nv2a_vk/nv2a_vk.c b/src/nv2a_vk/nv2a_vk.c
 new file mode 100644
-index 0000000..d24e6ea
+index 0000000..cb86592
 --- /dev/null
 +++ b/src/nv2a_vk/nv2a_vk.c
-@@ -0,0 +1,3381 @@
+@@ -0,0 +1,3573 @@
 +/*
 + * The NV2A renderer's device on Vulkan (nv2a_backend.h): the third backend,
 + * beside OpenGL (nv2a_gl/nv2a_gfx_gl.c) and Metal (nv2a_metal/nv2a_metal.m).
@@ -1911,6 +1911,10 @@ index 0000000..d24e6ea
 +static Nv2aRenderState g_rs;
 +static float g_generic[16][4];
 +static uint32_t g_vb_off, g_vb_stride, g_cb_off, g_have_verts;
++static VkBuffer g_vb_buf;              /* binding 0's buffer: a kept one (vbuf_bind), or VK_NULL_HANDLE for the ring */
++static VkBuffer g_ib_buf;              /* the bound kept buffer's indices (draw_indexed) */
++static uint32_t g_ib_off;
++static int g_draw_idx;                 /* 0 a plain draw, 1 16-bit indices, 2 32-bit ones (draw_indexed) */
 +static int16_t g_vb_at[16];
 +static VkDescriptorSet g_set;
 +static uint32_t g_set_tex[4];
@@ -3054,6 +3058,7 @@ index 0000000..d24e6ea
 +	uint32_t bytes = nverts * stride_floats * 4;
 +	void *p;
 +	g_have_verts = 0;
++	g_vb_buf = VK_NULL_HANDLE;
 +	if (bytes) {
 +		uint32_t at = ring_alloc(bytes, &p);
 +		if (at == UINT32_MAX)
@@ -4119,10 +4124,13 @@ index 0000000..d24e6ea
 +	E.valid = 1;
 +	uint32_t dyn[2] = {ov, of};
 +	vkCmdBindDescriptorSets(c, VK_PIPELINE_BIND_POINT_GRAPHICS, g_pipe_layout, 0, 1, &set, 2, dyn);
-+	VkBuffer bufs[2] = {g_fr[g_slot].ring, g_fr[g_slot].ring};
++	VkBuffer bufs[2] = {g_vb_buf ? g_vb_buf : g_fr[g_slot].ring, g_fr[g_slot].ring};
 +	VkDeviceSize offs[2] = {g_vb_off, g_cb_off};
 +	vkCmdBindVertexBuffers(c, 0, 2, bufs, offs);
-+	if (prim == NV2A_PRIM_LINE_LOOP) {
++	if (g_draw_idx) {
++		vkCmdBindIndexBuffer(c, g_ib_buf, g_ib_off, g_draw_idx == 2 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16);
++		vkCmdDrawIndexed(c, count, 1, 0, 0, 0);
++	} else if (prim == NV2A_PRIM_LINE_LOOP) {
 +		vkCmdBindIndexBuffer(c, g_fr[g_slot].ring, loop_at, VK_INDEX_TYPE_UINT32);
 +		vkCmdDrawIndexed(c, count + 1, 1, 0, 0, 0);
 +	} else {
@@ -4130,6 +4138,183 @@ index 0000000..d24e6ea
 +	}
 +	n_draws++;
 +	trace_draw(prim, count);
++}
++
++
++/*
++ * Geometry kept between draws (decision log D54): the front half's vertex cache (nv2a_gl.c) decides what is kept and
++ * whether it still matches the title's memory; this holds the buffers, as the OpenGL device does. A kept buffer is
++ * host-visible memory of its own; refilled while a frame in flight may still read it (bound this frame or the one
++ * before), it gets new memory and the old is freed when that frame slot comes round. The stream buffer, refilled for
++ * nearly every draw, lives in the frame's ring like vertices() does. Without these the front half converted every
++ * draw's vertices again (vtx_convert, a tenth of the render thread in busy scenes).
++ */
++#define MAX_VB 16384
++typedef struct {
++	uint8_t used, stream;
++	VkBuffer buf;
++	VkDeviceMemory mem;
++	uint8_t *map;
++	uint32_t cap, vbytes, ibytes, ioff;
++	uint64_t bound_frame;          /* n_frames when last bound */
++	uint32_t ring_v, ring_i;       /* the stream buffer: its data in the ring ... */
++	uint64_t ring_stamp;           /* ... as of this submission */
++} VkVb;
++static VkVb *g_vbs;
++static uint64_t n_vb_fills, n_vb_orphans, n_vb_lost;
++
++static uint32_t vk_vbuf_new(int stream)
++{
++	if (!g_vbs && !(g_vbs = calloc(MAX_VB, sizeof *g_vbs)))
++		return 0;
++	for (uint32_t i = 0; i < MAX_VB; i++)
++		if (!g_vbs[i].used) {
++			memset(&g_vbs[i], 0, sizeof g_vbs[i]);
++			g_vbs[i].used = 1;
++			g_vbs[i].stream = stream != 0;
++			return i + 1;
++		}
++	LOG("out of kept vertex buffers\n");
++	return 0;
++}
++
++static VkVb *vb_of(uint32_t h)
++{
++	return (g_vbs && h && h <= MAX_VB && g_vbs[h - 1].used) ? &g_vbs[h - 1] : NULL;
++}
++
++static void vb_release(VkVb *b)
++{
++	if (b->buf) {
++		defer(DEAD_BUF, (uint64_t)b->buf);
++		defer(DEAD_MEM, (uint64_t)b->mem);
++	}
++	b->buf = VK_NULL_HANDLE;
++	b->mem = VK_NULL_HANDLE;
++	b->map = NULL;
++	b->cap = 0;
++}
++
++static void vk_vbuf_free(uint32_t h)
++{
++	VkVb *b = vb_of(h);
++	if (!b)
++		return;
++	vb_release(b);
++	b->used = 0;
++}
++
++static void vk_vbuf_fill(uint32_t h, const float *v, uint32_t vbytes, const void *idx, uint32_t ibytes)
++{
++	VkVb *b = vb_of(h);
++	if (!b)
++		return;
++	n_vb_fills++;
++	if (b->stream) {
++		void *p;
++		if (v) {
++			uint32_t at = ring_alloc(vbytes ? vbytes : 4, &p);
++			if (at == UINT32_MAX) return;
++			memcpy(p, v, vbytes);
++			b->ring_v = at;
++			b->vbytes = vbytes;
++		}
++		if (idx) {
++			uint32_t at = ring_alloc(ibytes ? ibytes : 4, &p);
++			if (at == UINT32_MAX) return;
++			memcpy(p, idx, ibytes);
++			b->ring_i = at;
++			b->ibytes = ibytes;
++		}
++		b->ring_stamp = g_stamp;
++		return;
++	}
++	/* what the buffer holds after this fill: new vertices and/or new indices, the rest kept */
++	uint32_t nv = v ? vbytes : b->vbytes, ni = idx ? ibytes : b->ibytes;
++	uint32_t ioff = (nv + 15) & ~15u, need = ioff + ni;
++	if (need == 0)
++		need = 16;
++	int busy = b->buf && b->bound_frame + 1 >= n_frames;
++	if (!b->buf || need > b->cap || busy) {
++		/* new memory: keep what is not being replaced */
++		uint8_t *old = b->map;
++		uint32_t old_v = b->vbytes, old_ioff = b->ioff, old_i = b->ibytes;
++		VkBuffer nb;
++		VkDeviceMemory nm;
++		uint8_t *nmap;
++		uint32_t cap = need < 4096 ? 4096 : (need + need / 4 + 255) & ~255u;
++		if (!host_buffer(cap, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT, &nb, &nm, &nmap)) {
++			LOG("no memory for a kept vertex buffer of %u bytes\n", cap);
++			return;
++		}
++		if (old) {
++			if (!v && old_v) memcpy(nmap, old, old_v);
++			if (!idx && old_i) memcpy(nmap + ioff, old + old_ioff, old_i);
++		}
++		if (busy) n_vb_orphans++;
++		vb_release(b);
++		b->buf = nb;
++		b->mem = nm;
++		b->map = nmap;
++		b->cap = cap;
++	} else if (!idx && b->ibytes && ioff != b->ioff) {
++		memmove(b->map + ioff, b->map + b->ioff, b->ibytes);   /* the vertices grew or shrank under kept indices */
++	}
++	if (v) memcpy(b->map, v, vbytes);
++	if (idx) memcpy(b->map + ioff, idx, ibytes);
++	b->vbytes = nv;
++	b->ibytes = ni;
++	b->ioff = ioff;
++}
++
++static void vk_vbuf_bind(uint32_t h, uint32_t stride_floats, const int attr_at[16], uint32_t const_mask,
++                         const float const_attr[16][4])
++{
++	uint64_t t0 = __builtin_ia32_rdtsc();
++	VkVb *b = vb_of(h);
++	g_have_verts = 0;
++	g_vb_buf = VK_NULL_HANDLE;
++	if (!b) return;
++	if (b->stream) {
++		if (b->ring_stamp != g_stamp) {   /* the ring started over since the fill: its data may be gone */
++			n_vb_lost++;
++			return;
++		}
++		g_vb_off = b->ring_v;
++		g_ib_buf = g_fr[g_slot].ring;
++		g_ib_off = b->ring_i;
++	} else {
++		if (!b->buf) return;
++		g_vb_buf = b->buf;
++		g_vb_off = 0;
++		g_ib_buf = b->buf;
++		g_ib_off = b->ioff;
++		b->bound_frame = n_frames;
++	}
++	g_vb_stride = stride_floats;
++	for (int i = 0; i < 16; i++) {
++		g_vb_at[i] = (int16_t)(b->vbytes ? attr_at[i] : -1);
++		if (attr_at[i] < 0 && (const_mask & (1u << i)))
++			memcpy(g_generic[i], const_attr[i], 16);
++	}
++	void *p;
++	uint32_t at = ring_alloc(sizeof g_generic, &p);
++	if (at == UINT32_MAX) return;
++	memcpy(p, g_generic, sizeof g_generic);
++	g_cb_off = at;
++	if (b->stream && b->ring_stamp != g_stamp) {   /* that ring_alloc started the ring over */
++		n_vb_lost++;
++		return;
++	}
++	g_have_verts = 1;
++	tsc_backend_v += __builtin_ia32_rdtsc() - t0;
++}
++
++static void vk_draw_indexed(int prim, uint32_t count, int idx32)
++{
++	g_draw_idx = idx32 ? 2 : 1;
++	vk_draw(prim, count);
++	g_draw_idx = 0;
 +}
 +
 +/* ---- clears and the flip -------------------------------------------------------------------------------------- */
@@ -4286,6 +4471,8 @@ index 0000000..d24e6ea
 +	}
 +	LOG("modes %x: %llu targets resolved before sampling; %llu draws dropped\n", jsrf_vk_modes,
 +	    (unsigned long long)n_resolves, (unsigned long long)n_dropped);
++	LOG("kept vertex buffers: %llu fills, %llu given new memory while in use, %llu binds lost to the ring\n",
++	    (unsigned long long)n_vb_fills, (unsigned long long)n_vb_orphans, (unsigned long long)n_vb_lost);
 +	if (n_tex_gone || n_tex_none)
 +		LOG("black in place of a texture: %llu draws whose texture was gone, %llu with none bound\n",
 +		    (unsigned long long)n_tex_gone, (unsigned long long)n_tex_none);
@@ -5062,6 +5249,11 @@ index 0000000..d24e6ea
 +	.uniform_f_part = vk_uniform_f_part,
 +	.pipeline_ms = vk_pipeline_ms,
 +	.zrev = vk_zrev,
++	.vbuf_new = vk_vbuf_new,
++	.vbuf_free = vk_vbuf_free,
++	.vbuf_fill = vk_vbuf_fill,
++	.vbuf_bind = vk_vbuf_bind,
++	.draw_indexed = vk_draw_indexed,
 +};
 +
 +const Nv2aGfx *nv2a_gfx_vk(void) { return &g_vk; }
