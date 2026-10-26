@@ -19,6 +19,8 @@ static int g_width, g_height;
 
 static EGLConfig g_config;
 static EGLContext g_status_context = EGL_NO_CONTEXT;
+/* The output mode: the start menu's choice (jsrf_ps5_menu.c, decision log D35), 2160p until it says otherwise. */
+static int g_mode_height = 2160;
 
 /* The display and the one window surface, for the status screen and then the game. */
 static int egl_open(void)
@@ -33,8 +35,9 @@ static int egl_open(void)
 	{
 		typedef EGLBoolean (*set_mode_fn)(EGLDisplay, EGLint, EGLint);
 		set_mode_fn set_mode = (set_mode_fn)eglGetProcAddress("eglSetDisplayModePS5");
-		EGLBoolean ok = set_mode && g_display != EGL_NO_DISPLAY ? set_mode(g_display, 3840, 2160) : EGL_FALSE;
-		fprintf(stderr, "jsrf: egl: display mode 3840x2160 %s\n",
+		const int mh = g_mode_height, mw = mh * 16 / 9;
+		EGLBoolean ok = set_mode && g_display != EGL_NO_DISPLAY ? set_mode(g_display, mw, mh) : EGL_FALSE;
+		fprintf(stderr, "jsrf: egl: display mode %dx%d %s\n", mw, mh,
 		        set_mode ? (ok ? "set" : "refused") : "not offered by this SDK (1080p)");
 	}
 	if (g_display == EGL_NO_DISPLAY || !eglInitialize(g_display, &major, &minor) || !eglBindAPI(EGL_OPENGL_API)) {
@@ -77,6 +80,31 @@ int jsrf_ps5_status_begin(void)
 		fprintf(stderr, "jsrf: egl: no context for the status screen (0x%x)\n", eglGetError());
 		return -1;
 	}
+	return 0;
+}
+
+/* The output mode to open the display with; 1080, 1440 or 2160. Before the display is open it is only kept; once it
+   is, the status screen's display is closed and opened again in the new mode (the mode is set before eglInitialize).
+   Returns 0 when the display is open in the mode asked for. */
+void jsrf_ps5_status_end(void);
+int jsrf_ps5_display_mode(int height)
+{
+	if (height != 1080 && height != 1440 && height != 2160)
+		return -1;
+	if (height == g_mode_height && g_surface != EGL_NO_SURFACE)
+		return 0;
+	g_mode_height = height;
+	if (g_surface == EGL_NO_SURFACE)
+		return 0;
+	int had_status = g_status_context != EGL_NO_CONTEXT;
+	jsrf_ps5_status_end();
+	eglDestroySurface(g_display, g_surface);
+	g_surface = EGL_NO_SURFACE;
+	eglTerminate(g_display);
+	g_display = EGL_NO_DISPLAY;
+	if (had_status ? jsrf_ps5_status_begin() != 0 : egl_open() != 0)
+		return -1;
+	fprintf(stderr, "jsrf: egl: display opened again at %dx%d\n", g_width, g_height);
 	return 0;
 }
 

@@ -35,6 +35,8 @@ void jsrf_ps5_status_end(void);
 int jsrf_ps5_gl_prepare(void);
 int __real_fflush(FILE *stream);
 void jsrf_ps5_screen_lines(const char *title, const char *const *lines, const int *pass, int count); /* screen */
+void jsrf_ps5_menu_prepare(const char *settings); /* jsrf_ps5_menu.c */
+void jsrf_ps5_menu(const char *settings);
 
 /* The desktop and Android launchers' settings (port/android/jsrf_android.c k_env), without Android's own SDL ones;
    SDL's video is the offscreen driver, the picture goes through EGL (jsrf_ps5_gl.c). Set before the runtime's own
@@ -316,6 +318,7 @@ int nv_ps5_main(int argc, char **argv, int (*host)(void))
 	(void)argv;
 	fprintf(stderr, "jsrf: JSRF Unleashed %s for PS5\n", JSRF_VERSION);
 	log_flexible("at the start");
+	jsrf_ps5_menu_prepare(SETTINGS_FILE); /* the kept output mode, before the display opens (D35) */
 	if (jsrf_ps5_status_begin() != 0)
 		return 1;
 	if (!exists(GAME_DIR "/default.xbe")) {
@@ -348,6 +351,7 @@ int nv_ps5_main(int argc, char **argv, int (*host)(void))
 			fprintf(stderr, "jsrf: settings written: scale 4, widescreen\n");
 		}
 	}
+	jsrf_ps5_menu(SETTINGS_FILE); /* resolution, scale, widescreen; five seconds, X to change them (D35) */
 	status("STARTING", NULL, 0);
 	log_flexible("before the engine");
 	measure_waits();

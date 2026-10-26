@@ -24,7 +24,7 @@ add_subdirectory(src-upstream/port "${CMAKE_BINARY_DIR}/port")
 if(JSRF_PS5_VULKAN)
   target_sources(jsrf_recomp PRIVATE ps5/jsrf_ps5_vk.c ps5/jsrf_ps5_main.c ${PROSPERO_SUPPORT_SOURCES})
 else()
-target_sources(jsrf_recomp PRIVATE ps5/jsrf_ps5_gl.c ps5/jsrf_ps5_main.c ps5/jsrf_ps5_screen.c
+target_sources(jsrf_recomp PRIVATE ps5/jsrf_ps5_gl.c ps5/jsrf_ps5_main.c ps5/jsrf_ps5_screen.c ps5/jsrf_ps5_menu.c
   ${PROSPERO_SUPPORT_SOURCES})
 endif()
 target_include_directories(jsrf_recomp PRIVATE src-upstream/port)

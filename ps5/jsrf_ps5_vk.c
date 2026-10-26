@@ -19,6 +19,17 @@ int jsrf_ps5_gl_prepare(void)
 	return 0;
 }
 
+/* The start menu (D35) needs the screen: until V2 the game starts with the settings file as it is. */
+void jsrf_ps5_menu_prepare(const char *settings)
+{
+	(void)settings;
+}
+
+void jsrf_ps5_menu(const char *settings)
+{
+	(void)settings;
+}
+
 void jsrf_ps5_screen_lines(const char *title, const char *const *lines, const int *pass, int count)
 {
 	(void)pass;

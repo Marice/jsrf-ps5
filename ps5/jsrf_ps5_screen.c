@@ -4,6 +4,7 @@
 
 #include <GL/gl.h>
 #include <ctype.h>
+#include <stdio.h>
 #include <string.h>
 
 /* 5x7 glyphs, one byte per row, bit 4 the leftmost pixel. */
@@ -27,6 +28,7 @@ static const struct {
 	{'-', {0, 0, 0, 31, 0, 0, 0}},       {'(', {2, 4, 8, 8, 8, 4, 2}},        {')', {8, 4, 2, 2, 2, 4, 8}},
 	{'/', {1, 1, 2, 4, 8, 16, 16}},      {'%', {24, 25, 2, 4, 8, 19, 3}},     {'!', {4, 4, 4, 4, 4, 0, 4}},
 	{'?', {14, 17, 1, 2, 4, 0, 4}},      {'\'', {4, 4, 8, 0, 0, 0, 0}},       {'_', {0, 0, 0, 0, 0, 0, 31}},
+	{'<', {2, 4, 8, 16, 8, 4, 2}},       {'>', {8, 4, 2, 1, 2, 4, 8}},
 };
 
 static const unsigned char *glyph(char c)
@@ -91,6 +93,53 @@ void jsrf_ps5_screen_lines(const char *title, const char *const *lines, const in
 		else
 			glColor3f(1.0f, 0.35f, 0.3f);
 		text(lines[i], h * 0.18f + i * px * 11.0f, px, w);
+	}
+	eglSwapBuffers(display, surface);
+}
+
+/* The start menu (jsrf_ps5_menu.c, decision log D35): rows of a label and its value, the chosen row in yellow with
+   arrows round its value, and one line underneath (the countdown or the buttons). */
+void jsrf_ps5_screen_menu(const char *title, const char *subtitle, const char *const *labels,
+                          const char *const *values, int count, int selected, const char *footer)
+{
+	EGLDisplay display = eglGetCurrentDisplay();
+	EGLSurface surface = eglGetCurrentSurface(EGL_DRAW);
+	EGLint w = 0, h = 0;
+	eglQuerySurface(display, surface, EGL_WIDTH, &w);
+	eglQuerySurface(display, surface, EGL_HEIGHT, &h);
+	glViewport(0, 0, w, h);
+	glDisable(GL_DEPTH_TEST);
+	glDisable(GL_TEXTURE_2D);
+	glDisable(GL_BLEND);
+	glClearColor(0.06f, 0.08f, 0.12f, 1.0f);
+	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+	glMatrixMode(GL_PROJECTION);
+	glLoadIdentity();
+	glOrtho(0.0, w, h, 0.0, -1.0, 1.0);
+	glMatrixMode(GL_MODELVIEW);
+	glLoadIdentity();
+	float px = h / 270.0f;
+	glColor3f(1.0f, 0.78f, 0.2f);
+	text(title, h * 0.08f, px * 1.5f, w);
+	if (subtitle) {
+		glColor3f(0.55f, 0.6f, 0.7f);
+		text(subtitle, h * 0.08f + px * 14.0f, px, w);
+	}
+	char row[96];
+	for (int i = 0; i < count; i++) {
+		if (values[i])
+			snprintf(row, sizeof row, i == selected ? "%-12s < %s >" : "%-12s   %s  ", labels[i], values[i]);
+		else
+			snprintf(row, sizeof row, i == selected ? "> %s <" : "%s", labels[i]);
+		if (i == selected)
+			glColor3f(1.0f, 0.85f, 0.25f);
+		else
+			glColor3f(0.85f, 0.88f, 0.92f);
+		text(row, h * 0.32f + i * px * 14.0f, px * 1.2f, w);
+	}
+	if (footer) {
+		glColor3f(0.4f, 0.9f, 0.45f);
+		text(footer, h * 0.32f + count * px * 14.0f + px * 12.0f, px, w);
 	}
 	eglSwapBuffers(display, surface);
 }
