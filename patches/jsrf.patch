@@ -181,6 +181,19 @@ index 3ec36d6..cd89ce0 100644
  #endif
      if (argc > 1) g_game_dir_arg = argv[1];
      return host_main();
+diff --git a/port/recomp_manual.c b/port/recomp_manual.c
+index 211b68d..bfd775c 100644
+--- a/port/recomp_manual.c
++++ b/port/recomp_manual.c
+@@ -2281,7 +2281,7 @@ void sub_00194210(void)
+     uint32_t seen = *intr;
+     sub_00194210_gen();
+     *intr &= ~seen;
+-    if (!*intr) *pmc &= ~0x1000u;
++    if (!*intr) __atomic_fetch_and(pmc, ~0x1000u, __ATOMIC_ACQ_REL); /* the renderer's thread writes it too (D56) */
+     g_eax = *intr;
+     if (seen & 0x00100000u) xbox_nv2a_software_method_done();
+ }
 diff --git a/src/d3d/CMakeLists.txt b/src/d3d/CMakeLists.txt
 index ddf0005..0c8f828 100644
 --- a/src/d3d/CMakeLists.txt
@@ -208,7 +221,7 @@ index 2b3b3f4..e91438d 100644
      # needed (and on an iPhone or an Android phone not there).
      target_link_libraries(xbox_kernel PUBLIC platform xbox_nv2a_gl)
 diff --git a/src/kernel/kernel_bridge.c b/src/kernel/kernel_bridge.c
-index 331d6fe..9a326ba 100644
+index 331d6fe..afc9d44 100644
 --- a/src/kernel/kernel_bridge.c
 +++ b/src/kernel/kernel_bridge.c
 @@ -54,10 +54,16 @@ uint32_t xbox_GetConnectedInterrupt(uint32_t vector);
@@ -272,7 +285,86 @@ index 331d6fe..9a326ba 100644
  static int kernel_run_dpc(uint32_t dpc_va, uint32_t arg1, uint32_t arg2)
  {
      int r;
-@@ -2919,6 +2939,17 @@ static XboxTimer g_timers[XBOX_MAX_TIMERS];
+@@ -2413,9 +2433,11 @@ static void kernel_vblank_tick(void)
+      * interrupt the title has not looked at yet from one it has acknowledged.
+      * Without that distinction the status bits were wiped 200 us after this
+      * line and the DPC below found nothing pending -- see vblank_intr_tick(). */
+-    BRIDGE_MEM32(XBOX_NV2A_REG_BASE + NV2A_PCRTC_INTR_0) |=
+-        NV2A_PCRTC_INTR_VBLANK | NV2A_VBLANK_PENDING_TAG;
+-    BRIDGE_MEM32(XBOX_NV2A_REG_BASE + NV2A_PMC_INTR_0)   |= NV2A_PMC_INTR_PCRTC;
++    /* Atomic: the renderer's thread completes these registers concurrently. */
++    __atomic_fetch_or(&BRIDGE_MEM32(XBOX_NV2A_REG_BASE + NV2A_PCRTC_INTR_0),
++                      NV2A_PCRTC_INTR_VBLANK | NV2A_VBLANK_PENDING_TAG, __ATOMIC_ACQ_REL);
++    __atomic_fetch_or(&BRIDGE_MEM32(XBOX_NV2A_REG_BASE + NV2A_PMC_INTR_0),
++                      NV2A_PMC_INTR_PCRTC, __ATOMIC_ACQ_REL);
+ 
+     g_vblank_count++;
+     {
+@@ -2506,19 +2528,60 @@ void xbox_nv2a_software_method_done(void)
+     g_swm_in_flight = 0;
+ }
+ 
++/* A software method in flight whose PMC_INTR_0 bit is gone: the title's DPC
++ * would never see it, never acknowledge it, and no software method would be
++ * raised again (the make-space wait at 0x0019151B for good). The handler's
++ * wrapper clears that bit a few instructions before it acknowledges, so only
++ * a bit missing on three ticks in a row counts; then both bits are set again
++ * and the interrupt raised again, and the log says so (jsrf-ps5 D56). */
++static void kernel_pgraph_rescue(void)
++{
++    static unsigned missing;
++    static unsigned long rescued;
++    if (!(__atomic_load_n(&BRIDGE_MEM32(XBOX_NV2A_REG_BASE + NV2A_PMC_INTR_0), __ATOMIC_ACQUIRE)
++          & NV2A_PMC_INTR_PGRAPH)) {
++        if (++missing < 3) return;
++    } else {
++        missing = 0;
++        return;
++    }
++    missing = 0;
++    xbox_guest_lock_acquire();
++    if (g_swm_in_flight &&
++        !(BRIDGE_MEM32(XBOX_NV2A_REG_BASE + NV2A_PMC_INTR_0) & NV2A_PMC_INTR_PGRAPH)) {
++        __atomic_fetch_or(&BRIDGE_MEM32(XBOX_NV2A_REG_BASE + NV2A_PGRAPH_INTR),
++                          NV2A_PGRAPH_INTR_ERROR, __ATOMIC_ACQ_REL);
++        __atomic_fetch_or(&BRIDGE_MEM32(XBOX_NV2A_REG_BASE + NV2A_PMC_INTR_0),
++                          NV2A_PMC_INTR_PGRAPH, __ATOMIC_ACQ_REL);
++        int claimed = kernel_raise_interrupt_locked(NV2A_VECTOR);
++        if (++rescued <= 8) {
++            fprintf(stderr, "  [NV2A] software method #%lu had lost its interrupt bit: raised again (#%lu), ISR %s\n",
++                    g_swm_raised, rescued, claimed < 0 ? "not callable" : claimed ? "claimed it" : "declined it");
++            fflush(stderr);
++        }
++    }
++    xbox_guest_lock_release();
++}
++
+ static void kernel_pgraph_tick(void)
+ {
+     uint32_t t = g_swm_tail;
+     int claimed;
+-    if (g_swm_in_flight || t == __atomic_load_n(&g_swm_head, __ATOMIC_ACQUIRE)) return;
++    if (g_swm_in_flight) {
++        kernel_pgraph_rescue();
++        return;
++    }
++    if (t == __atomic_load_n(&g_swm_head, __ATOMIC_ACQUIRE)) return;
+     if (!xbox_GetConnectedInterrupt(NV2A_VECTOR)) return;
+     BRIDGE_MEM32(XBOX_NV2A_REG_BASE + NV2A_PGRAPH_TRAP_ADDR) =
+         0x100u | (g_swm_q[t % SWM_QUEUE].subch << 16);
+     BRIDGE_MEM32(XBOX_NV2A_REG_BASE + NV2A_PGRAPH_TRAP_DATA) = g_swm_q[t % SWM_QUEUE].param;
+     BRIDGE_MEM32(XBOX_NV2A_REG_BASE + NV2A_PGRAPH_NSOURCE) = 1u;   /* a notification */
+     g_swm_in_flight = 1;
+-    BRIDGE_MEM32(XBOX_NV2A_REG_BASE + NV2A_PGRAPH_INTR) |= NV2A_PGRAPH_INTR_ERROR;
+-    BRIDGE_MEM32(XBOX_NV2A_REG_BASE + NV2A_PMC_INTR_0)  |= NV2A_PMC_INTR_PGRAPH;
++    __atomic_fetch_or(&BRIDGE_MEM32(XBOX_NV2A_REG_BASE + NV2A_PGRAPH_INTR),
++                      NV2A_PGRAPH_INTR_ERROR, __ATOMIC_ACQ_REL);
++    __atomic_fetch_or(&BRIDGE_MEM32(XBOX_NV2A_REG_BASE + NV2A_PMC_INTR_0),
++                      NV2A_PMC_INTR_PGRAPH, __ATOMIC_ACQ_REL);
+     claimed = kernel_raise_interrupt(NV2A_VECTOR);
+     g_swm_raised++;
+     if (g_swm_raised <= 3 || claimed <= 0) {
+@@ -2919,6 +2982,17 @@ static XboxTimer g_timers[XBOX_MAX_TIMERS];
  static CRITICAL_SECTION g_timer_lock;
  static int g_timer_started;
  
@@ -290,7 +382,7 @@ index 331d6fe..9a326ba 100644
  static DWORD WINAPI kernel_timer_thread(LPVOID unused)
  {
      int slot = xbox_worker_stack_alloc();
-@@ -2946,11 +2977,40 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
+@@ -2946,11 +3020,40 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
          g_fs_base = tib;
      }
  
@@ -331,7 +423,7 @@ index 331d6fe..9a326ba 100644
          /*
           * RECOMP_TABLE_WATCH=<addr>,<bytes>,<stride>: catch a pointer table
           * going bad at the moment it goes bad.
-@@ -3018,12 +3078,19 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
+@@ -3018,12 +3121,19 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
                  prev_valid = 1;
              }
          }
@@ -351,7 +443,7 @@ index 331d6fe..9a326ba 100644
          now = (long long)GetTickCount64();
  
          for (i = 0; i < XBOX_MAX_TIMERS; i++) {
-@@ -3047,6 +3114,7 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
+@@ -3047,6 +3157,7 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
              if (dpc)
                  kernel_run_dpc(dpc, 0, 0);
          }
@@ -359,7 +451,7 @@ index 331d6fe..9a326ba 100644
      }
  }
  
-@@ -3638,7 +3706,12 @@ static void deliver_one_apc(uint32_t apc_routine, uint32_t apc_context,
+@@ -3638,7 +3749,12 @@ static void deliver_one_apc(uint32_t apc_routine, uint32_t apc_context,
   * now. RECOMP_APC_INLINE=1 restores the old behaviour. */
  #define BRIDGE_APC_RING 32
  static RECOMP_TLS struct { uint32_t routine, context, iostatus; } t_apc_ring[BRIDGE_APC_RING];
@@ -372,7 +464,7 @@ index 331d6fe..9a326ba 100644
  
  static void bridge_queue_apc(uint32_t apc_routine, uint32_t apc_context, uint32_t iostatus)
  {
-@@ -6149,7 +6222,11 @@ static void kernel_watch_arm_once(void)
+@@ -6149,7 +6265,11 @@ static void kernel_watch_arm_once(void)
   * SetThreadPriority arriving as NtSuspendThread(NULL), and GetThreadPriority
   * returning with esp 4 high and esi zeroed -- which took CRI's file handle
   * out of its register and stopped the music stream. */
@@ -384,7 +476,7 @@ index 331d6fe..9a326ba 100644
  
  /* ── Guest scheduler lock: one guest thread runs at a time ──────────────
   *
-@@ -6169,6 +6246,32 @@ static RECOMP_TLS int g_kernel_dispatch_slot = -1;
+@@ -6169,6 +6289,32 @@ static RECOMP_TLS int g_kernel_dispatch_slot = -1;
   *
   * RECOMP_GUEST_LOCK=0 disables it. */
  static CRITICAL_SECTION g_guest_lock;
@@ -417,7 +509,7 @@ index 331d6fe..9a326ba 100644
  static volatile unsigned long g_lock_owner;   /* see xbox_guest_lock_report */
  #ifdef __APPLE__
  #include <pthread.h>
-@@ -6258,6 +6361,33 @@ int32_t g_xbox_guest_cpu_preempt;
+@@ -6258,6 +6404,33 @@ int32_t g_xbox_guest_cpu_preempt;
  /* The holder's latest loop back edge and its IRQL there, for the [LOCK]
   * report. */
  static volatile uint32_t g_lock_owner_edge;
@@ -451,7 +543,7 @@ index 331d6fe..9a326ba 100644
  static volatile unsigned g_lock_owner_irql;
  /* Interrupts delivered from inside a spin rather than on the timer thread. */
  static unsigned long g_spin_isrs;
-@@ -6284,7 +6414,11 @@ static long long     g_lock_wait_ms[LOCK_SLOTS];
+@@ -6284,7 +6457,11 @@ static long long     g_lock_wait_ms[LOCK_SLOTS];
  static long long     g_lock_hold_ms[LOCK_SLOTS];
  static unsigned long g_lock_takes[LOCK_SLOTS];
  static unsigned long g_lock_tid[LOCK_SLOTS];
@@ -463,7 +555,7 @@ index 331d6fe..9a326ba 100644
  static int lock_watch(void)
  {
      static int on = -1;
-@@ -6313,9 +6447,15 @@ int xbox_guest_lock_idle_takes_lock(void)
+@@ -6313,9 +6490,15 @@ int xbox_guest_lock_idle_takes_lock(void)
      if (v < 0) v = getenv("RECOMP_LOCK_IDLE") ? 1 : 0;
      return v;
  }
@@ -479,7 +571,7 @@ index 331d6fe..9a326ba 100644
  
  static int guest_lock_on(void)
  {
-@@ -7241,7 +7381,11 @@ typedef struct {
+@@ -7241,7 +7424,11 @@ typedef struct {
  } KThreadState;
  static KThreadState g_kthreads[KTHREAD_SLOTS];
  static volatile long g_kthread_n;
@@ -745,7 +837,7 @@ index f3668a7..05b3dc5 100644
  
  #define FPS_MAX 512
 diff --git a/src/kernel/xbox_memory_layout.c b/src/kernel/xbox_memory_layout.c
-index 99d17e7..68c4fbf 100644
+index 99d17e7..5915268 100644
 --- a/src/kernel/xbox_memory_layout.c
 +++ b/src/kernel/xbox_memory_layout.c
 @@ -214,6 +214,27 @@ static void nv2a_kick_signal(void)
@@ -784,7 +876,7 @@ index 99d17e7..68c4fbf 100644
  void xbox_nv2a_kick(void)
  {
      if (s_kick_on < 0) { const char *e = getenv("RECOMP_NV2A_KICK"); s_kick_on = e ? atoi(e) : 1; }
-@@ -682,6 +704,44 @@ static void framebuffer_probe_tick(void)
+@@ -682,23 +704,67 @@ static void framebuffer_probe_tick(void)
   * is not -- and the acknowledgement de-asserts PMC_INTR_0's PCRTC bit, which
   * is what the handler's own spin loop is waiting for.
   */
@@ -829,7 +921,38 @@ index 99d17e7..68c4fbf 100644
  static void vblank_intr_tick(volatile uint32_t *regs)
  {
      volatile uint32_t *pcrtc = (volatile uint32_t *)((char *)regs + 0x600100);
-@@ -718,10 +778,132 @@ void xbox_nv2a_vblank_service(void)
+     volatile uint32_t *pmc   = (volatile uint32_t *)((char *)regs + 0x000100);
+-    uint32_t v = *pcrtc;
++    uint32_t v = __atomic_load_n(pcrtc, __ATOMIC_ACQUIRE);
+ 
+     if (v & NV2A_VBLANK_PENDING_TAG)
+         return;                       /* raised, not yet acknowledged */
+ 
+     /* Acknowledged (or never raised): complete it. A PGRAPH software method
+-     * still with the title keeps its bit (see kernel_pgraph_tick). */
+-    if (v)
+-        *pcrtc = 0;
+-    if (*pmc) {
+-        extern int xbox_nv2a_swm_in_flight(void);
+-        *pmc = xbox_nv2a_swm_in_flight() ? (*pmc & (1u << 12)) : 0;
+-    }
++     * keeps its bit: that one is cleared by the title's PGRAPH handler (the
++     * port's wrapper on it) and by nothing else (see kernel_pgraph_tick).
++     * Both registers are also written by the thread that raises interrupts,
++     * so neither is read and stored whole: a vblank raised between the read
++     * and the store keeps its bits, and so does a software method. This
++     * thread once read "no software method in flight", the timer thread then
++     * raised one, and the store wiped its PGRAPH bit: the title's DPC found
++     * nothing, never acknowledged it, no software method was raised again,
++     * and the make-space wait at 0x0019151B slept for good (jsrf-ps5 D56). */
++    if (v && !__atomic_compare_exchange_n(pcrtc, &v, 0u, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
++        return;                       /* raised again meanwhile */
++    if (__atomic_load_n(pmc, __ATOMIC_ACQUIRE) & ~(1u << 12))
++        __atomic_fetch_and(pmc, 1u << 12, __ATOMIC_ACQ_REL);
+ }
+ 
+ /* The same, for code that keeps this thread away from its loop.
+@@ -718,10 +784,132 @@ void xbox_nv2a_vblank_service(void)
      if (g_nv2a_memory) vblank_intr_tick((volatile uint32_t *)g_nv2a_memory);
  }
  
@@ -962,7 +1085,7 @@ index 99d17e7..68c4fbf 100644
          vblank_intr_tick(regs);
          for (size_t i = 0; i < sizeof(NV2A_ACK) / sizeof(NV2A_ACK[0]); i++) {
              volatile uint32_t *r =
-@@ -747,7 +929,17 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -747,7 +935,17 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
                  (volatile uint32_t *)((char *)regs + NV2A_USER_DMA_PUT);
              volatile uint32_t *get =
                  (volatile uint32_t *)((char *)regs + NV2A_USER_DMA_GET);
@@ -981,7 +1104,7 @@ index 99d17e7..68c4fbf 100644
                  *get = *put;
              }
          }
-@@ -755,6 +947,9 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -755,6 +953,9 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
          counter_mirrors_tick();
          frame_counters_tick();
          framebuffer_probe_tick();
@@ -991,7 +1114,7 @@ index 99d17e7..68c4fbf 100644
  
          /* Which framebuffer the display would be scanning out.
           *
-@@ -793,9 +988,17 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -793,9 +994,17 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
                       * The contiguous window IS the physical-address view, so
                       * OR-ing its base is the documented round trip, not a
                       * guess. */
@@ -1010,7 +1133,7 @@ index 99d17e7..68c4fbf 100644
                      } else if (last_put && put < last_put) {
                          /* The ring wrapped: PUT went back to its start.
                           * The tail from the old PUT to the jump used to be
-@@ -805,10 +1008,37 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -805,10 +1014,37 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
                           * then from the jump's target to the new PUT. */
                          uint32_t from = XBOX_CONTIG_BASE | (last_put & 0x0FFFFFFFu);
                          uint32_t to   = XBOX_CONTIG_BASE | (put      & 0x0FFFFFFFu);
@@ -1050,7 +1173,7 @@ index 99d17e7..68c4fbf 100644
                          }
                      }
                      /* Periodic, because what the title submits at init is not
-@@ -821,6 +1051,11 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -821,6 +1057,11 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
                      }
                  }
                  last_put = put; last_put_ms = now_ms;
@@ -1062,7 +1185,7 @@ index 99d17e7..68c4fbf 100644
                  /* GET as well as PUT. A title that stops submitting has either
                   * finished or is spinning on the GPU catching up, and only GET
                   * tells those apart -- D3D waits for GET to reach PUT before it
-@@ -878,6 +1113,9 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -878,6 +1119,9 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
          *(volatile uint32_t *)((uintptr_t)(XBOX_KERNEL_DATA_BASE + KDATA_TICK_COUNT)
                                 + g_memory_offset) = GetTickCount();
  
@@ -1072,7 +1195,7 @@ index 99d17e7..68c4fbf 100644
          /* Yield -- or actually sleep, on a host with fewer cores than the
           * runtime has busy threads. RECOMP_ACK_SLEEP_US=<n> (default 200 on
           * POSIX) keeps this thread from eating a whole core; the pushbuffer
-@@ -905,6 +1143,9 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -905,6 +1149,9 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
              else Sleep(0);
  #endif
          }
@@ -1082,7 +1205,7 @@ index 99d17e7..68c4fbf 100644
      }
      return 0;
  }
-@@ -951,7 +1192,87 @@ uint32_t g_xbox_code_hi = 0;
+@@ -951,7 +1198,87 @@ uint32_t g_xbox_code_hi = 0;
  /* Global registers for recompiled code (via recomp_types.h) */
  /* Each guest thread's TIB. The first thread uses the one the loader built;
   * a spawned thread gets its own from xbox_AllocThreadTib(). */
@@ -1170,7 +1293,7 @@ index 99d17e7..68c4fbf 100644
  
  /* The shape of the TLS block the loader built, so a new thread can be
   * given one just like it: where the initialised image data starts, how
-@@ -959,8 +1280,12 @@ RECOMP_TLS uint32_t g_fs_base = XBOX_TIB_MAIN;
+@@ -959,8 +1286,12 @@ RECOMP_TLS uint32_t g_fs_base = XBOX_TIB_MAIN;
   * at is. Zero total means the image had no TLS directory. */
  static uint32_t g_tls_template_va, g_tls_total, g_tls_thread_size = 64;
  
@@ -1183,7 +1306,7 @@ index 99d17e7..68c4fbf 100644
  
  #ifdef RECOMP_ABI_CHECK
  /* Report a lifted function that returned without restoring ebx/esi/edi.
-@@ -1105,19 +1430,37 @@ void recomp_abi_violation_log(uint32_t va, uint32_t ebx0, uint32_t esi0,
+@@ -1105,19 +1436,37 @@ void recomp_abi_violation_log(uint32_t va, uint32_t ebx0, uint32_t esi0,
  #endif
  
  /* SEH frame pointer bridge (see recomp_types.h for explanation) */
@@ -1221,7 +1344,7 @@ index 99d17e7..68c4fbf 100644
  
  /* ---- non-local jumps ---------------------------------------------------
   *
-@@ -1136,7 +1479,11 @@ typedef struct {
+@@ -1136,7 +1485,11 @@ typedef struct {
  } recomp_jmp_slot;
  
  static RECOMP_TLS recomp_jmp_slot s_jmp[RECOMP_JMPBUF_SLOTS];
@@ -1233,7 +1356,7 @@ index 99d17e7..68c4fbf 100644
  
  jmp_buf *recomp_setjmp_slot(uint32_t buf_va)
  {
-@@ -1301,13 +1648,23 @@ void xbox_WatchdogStart(void)
+@@ -1301,13 +1654,23 @@ void xbox_WatchdogStart(void)
  }
  
  /* SSE. 128 bits of architectural state, per-thread like the rest. */
@@ -1257,7 +1380,7 @@ index 99d17e7..68c4fbf 100644
  
  /* EFLAGS.DF. Zero means the string instructions walk forwards, which is the
   * ABI's resting state and what almost every one of them does -- so this is
-@@ -1316,10 +1673,14 @@ RECOMP_TLS uint32_t g_ebp = 0;
+@@ -1316,10 +1679,14 @@ RECOMP_TLS uint32_t g_ebp = 0;
   * `std; repne scasb`, and memmove goes backwards when its regions overlap the
   * wrong way. Thread-local, because `std` and the `cld` that undoes it can land
   * in different lifted bodies of the same guest routine. */
@@ -1272,7 +1395,7 @@ index 99d17e7..68c4fbf 100644
  
  /* ICALL trace ring buffer */
  volatile uint32_t g_icall_trace[16] = {0};
-@@ -1431,7 +1792,20 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -1431,7 +1798,20 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
           */
  #if !defined(_WIN32)
          {
