@@ -812,10 +812,10 @@ index 257ba1c..6d8c2a5 100644
      nv2a_vsh.c
      nv2a_vsh_interp.c
 diff --git a/src/nv2a_gl/nv2a_backend.h b/src/nv2a_gl/nv2a_backend.h
-index c437541..05e532c 100644
+index 35a469a..c6a264d 100644
 --- a/src/nv2a_gl/nv2a_backend.h
 +++ b/src/nv2a_gl/nv2a_backend.h
-@@ -407,6 +407,8 @@ typedef struct Nv2aGfx {
+@@ -414,6 +414,8 @@ typedef struct Nv2aGfx {
   * device, no Metal in this build). */
  const Nv2aGfx *nv2a_gfx_gl(void);
  const Nv2aGfx *nv2a_gfx_metal(void);
@@ -825,10 +825,10 @@ index c437541..05e532c 100644
  #ifdef __cplusplus
  }
 diff --git a/src/nv2a_gl/nv2a_gl.c b/src/nv2a_gl/nv2a_gl.c
-index 75b66db..ead1dea 100644
+index 20c9273..1f32680 100644
 --- a/src/nv2a_gl/nv2a_gl.c
 +++ b/src/nv2a_gl/nv2a_gl.c
-@@ -1084,6 +1084,9 @@ static uint32_t fnv(const void *p, size_t n)
+@@ -1107,6 +1107,9 @@ static uint32_t fnv(const void *p, size_t n)
  
  #if defined(NV2A_GL_USE_NONE)
  
@@ -838,7 +838,7 @@ index 75b66db..ead1dea 100644
  /* No OpenGL in this build: Metal or nothing. */
  static int gl_init(uint32_t w, uint32_t h)
  {
-@@ -1757,18 +1760,169 @@ static void sdl_menu_command(unsigned id)
+@@ -1791,18 +1794,169 @@ static void sdl_menu_command(unsigned id)
   * 16:9 (the 640x480 surface holds a 16:9 view squeezed), anything else at its
   * own shape. One blit; every piece of GL state the renderer caches is put
   * back the way it was. */
@@ -1008,7 +1008,7 @@ index 75b66db..ead1dea 100644
      if (ww <= 0 || wh <= 0) return;
      if (nv2a_wide_scene()) { fw = (int)(nv2a_wide_aspect() * 900.0f + 0.5f); fh = 900; }   /* 16:9 = 1600:900 */
      dw = ww; dh = wh;
-@@ -1776,21 +1930,32 @@ static void sdl_present(GLuint src_fbo, int sw, int sh)
+@@ -1810,21 +1964,32 @@ static void sdl_present(GLuint src_fbo, int sw, int sh)
      else                               dh = (int)((long)ww * fh / fw);
      glDisable(GL_SCISSOR_TEST);
      glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
@@ -1041,7 +1041,7 @@ index 75b66db..ead1dea 100644
      { static int said;
        if (said < 3) {
            said++;
-@@ -5061,6 +5226,10 @@ static void do_draw_body(void)
+@@ -5210,6 +5375,10 @@ static void do_draw_body(void)
       */
      {
          uint32_t inputs = g_pcache[slot].inputs;
@@ -1052,7 +1052,7 @@ index 75b66db..ead1dea 100644
          for (i = 0; i < NUM_ATTRS; i++) {
              const Attr *a = &S.attr[i];
              attr_at[i] = -1;
-@@ -5069,6 +5238,28 @@ static void do_draw_body(void)
+@@ -5218,6 +5387,28 @@ static void do_draw_body(void)
                  const_mask |= 1u << i;
                  continue;
              }
@@ -1081,7 +1081,7 @@ index 75b66db..ead1dea 100644
              live[nlive].base = inl
                  ? (const uint8_t *)S.inline_buf + a->offset
                  : guest(resolve(a->offset));
-@@ -9618,11 +9809,17 @@ static void present(int is_frame)
+@@ -9780,11 +9971,17 @@ static void present(int is_frame)
          }
      }
  
@@ -1099,7 +1099,7 @@ index 75b66db..ead1dea 100644
  
      /* Put the finished frame on screen: the surface the title has set up
       * when it flips, which is what the window showed while surfaces were
-@@ -9667,13 +9864,24 @@ static void present(int is_frame)
+@@ -9829,13 +10026,24 @@ static void present(int is_frame)
              if (g_presenter == 1) sdl_hand_over(nv2a_gfx_gl_fbo(prt), (int)pw, (int)ph);
              else
  #endif
@@ -1124,7 +1124,7 @@ index 75b66db..ead1dea 100644
  #if defined(NV2A_GL_USE_CGL)
          if (g_windowed && nv_window_should_close()) {
              fprintf(stderr, "  [GL] window closed; stopping\n");
-@@ -11329,7 +11537,11 @@ static int gfx_init(uint32_t w, uint32_t h)
+@@ -11571,7 +11779,11 @@ static int gfx_init(uint32_t w, uint32_t h)
      want_metal = 1;                   /* there is nothing else */
  #endif
      if (want_metal) {
@@ -1138,10 +1138,10 @@ index 75b66db..ead1dea 100644
              g_is_gl = 0;
 diff --git a/src/nv2a_vk/nv2a_vk.c b/src/nv2a_vk/nv2a_vk.c
 new file mode 100644
-index 0000000..3817597
+index 0000000..dcab2e4
 --- /dev/null
 +++ b/src/nv2a_vk/nv2a_vk.c
-@@ -0,0 +1,2071 @@
+@@ -0,0 +1,2082 @@
 +/*
 + * The NV2A renderer's device on Vulkan (nv2a_backend.h): the third backend,
 + * beside OpenGL (nv2a_gl/nv2a_gfx_gl.c) and Metal (nv2a_metal/nv2a_metal.m).
@@ -1238,6 +1238,7 @@ index 0000000..3817597
 +
 +static const VkFormat COLOR_FMT = VK_FORMAT_R8G8B8A8_UNORM;
 +static VkFormat g_depth_fmt = VK_FORMAT_D32_SFLOAT_S8_UINT;
++static int g_zrev; /* reversed depth: see vk_zrev */
 +
 +typedef struct {
 +	VkImage image;
@@ -1814,7 +1815,7 @@ index 0000000..3817597
 +	image_layout(c, rt->depth, VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT, 1, VK_IMAGE_LAYOUT_UNDEFINED,
 +	             VK_IMAGE_LAYOUT_GENERAL);
 +	VkClearColorValue cc = {{0, 0, 0, 0}};
-+	VkClearDepthStencilValue dc = {1.0f, 0};
++	VkClearDepthStencilValue dc = {g_zrev ? 0.0f : 1.0f, 0}; /* the far plane */
 +	VkImageSubresourceRange cr = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
 +	VkImageSubresourceRange dr = {VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT, 0, 1, 0, 1};
 +	vkCmdClearColorImage(c, g_tex[rt->color - 1].image, VK_IMAGE_LAYOUT_GENERAL, &cc, 1, &cr);
@@ -3179,6 +3180,15 @@ index 0000000..3817597
 +	return r == VK_SUCCESS || r == VK_SUBOPTIMAL_KHR;
 +}
 +
++/* Reversed depth (nv2a_vsh.c, depth_defines), as Metal's: the clip volume already runs z from 0 to w, and with D32S8
++ * the depth is floating point, so only a new target's depth starts at 0, the far plane; the front half turns the
++ * comparisons and clears around. Not with the D24S8 fallback, whose fixed point gains nothing from it. */
++static int vk_zrev(int want)
++{
++	g_zrev = want && g_depth_fmt == VK_FORMAT_D32_SFLOAT_S8_UINT;
++	return g_zrev;
++}
++
 +static const Nv2aGfx g_vk = {
 +	.name = "Vulkan",
 +	.lang = NV2A_LANG_GLSL,
@@ -3210,6 +3220,7 @@ index 0000000..3817597
 +	.report = vk_report,
 +	.uniform_f_part = vk_uniform_f_part,
 +	.pipeline_ms = vk_pipeline_ms,
++	.zrev = vk_zrev,
 +};
 +
 +const Nv2aGfx *nv2a_gfx_vk(void) { return &g_vk; }

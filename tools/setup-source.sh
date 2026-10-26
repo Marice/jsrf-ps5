@@ -5,7 +5,7 @@
 set -euo pipefail
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 repo=https://github.com/JuMatt/JetSetRadioFuture-Unleashed
-commit=4d31983
+commit=8f5723a
 src="$root/src-upstream"
 patch="$root/patches/jsrf.patch"
 
