@@ -179,6 +179,9 @@ void jsrf_ps5_menu_prepare(const char *settings)
 		extern uint32_t jsrf_vk_modes;
 		jsrf_vk_modes = (uint32_t)cfg_get(settings, "vk_modes", 0);
 	}
+	/* vk_replay=1: the captured draws in /app0/vkcap/replay.txt are drawn again before the menu (D43). */
+	if (cfg_get(settings, "vk_replay", 0))
+		setenv("JSRF_VK_REPLAY", "/app0/vkcap/replay.txt", 1);
 #endif
 	g_scale = cfg_get(settings, "scale", 4);
 	if (g_scale < 1 || g_scale > SCALE_MAX)
@@ -204,6 +207,14 @@ void jsrf_ps5_menu(const char *settings)
 	uint32_t before = 0;
 	const double start = now_s();
 
+#if defined(JSRF_PS5_RADV)
+	{
+		void nv2a_vk_replay(const char *list); /* src/nv2a_vk/nv2a_vk.c */
+		const char *list = getenv("JSRF_VK_REPLAY");
+		if (list && *list)
+			nv2a_vk_replay(list);
+	}
+#endif
 	pad_open();
 	before = pad_buttons(); /* a button already held does not count as a press */
 	for (;;) {

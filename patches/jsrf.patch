@@ -1154,10 +1154,10 @@ index 20c9273..1f32680 100644
              g_is_gl = 0;
 diff --git a/src/nv2a_vk/nv2a_vk.c b/src/nv2a_vk/nv2a_vk.c
 new file mode 100644
-index 0000000..66b8cce
+index 0000000..822b371
 --- /dev/null
 +++ b/src/nv2a_vk/nv2a_vk.c
-@@ -0,0 +1,2828 @@
+@@ -0,0 +1,3010 @@
 +/*
 + * The NV2A renderer's device on Vulkan (nv2a_backend.h): the third backend,
 + * beside OpenGL (nv2a_gl/nv2a_gfx_gl.c) and Metal (nv2a_metal/nv2a_metal.m).
@@ -3949,6 +3949,188 @@ index 0000000..66b8cce
 +{
 +	g_zrev = want && g_depth_fmt == VK_FORMAT_D32_SFLOAT_S8_UINT;
 +	return g_zrev;
++}
++
++
++/*
++ * jsrf-ps5: replay of captured draws (decision log D43), before the game starts, with JSRF_VK_REPLAY set to a list
++ * such as /app0/vkcap/replay.txt. Each line: a draw's inputs (the capture's .bin), its Vulkan GLSL (vertex, fragment),
++ * a BMP per texture unit or "-", an output name, then the state to draw it with in variant B: blend, its factors,
++ * depth test, write and function, cull, cull face, front face. Each draw goes onto a fresh 1280x960 target twice --
++ * A with no depth, blend or culling, B with the state given -- through this backend's own pipelines, descriptors and
++ * draws, and comes back as <name>_A.bmp and <name>_B.bmp: RADV on the console against the same draw elsewhere.
++ */
++static uint8_t *replay_file(const char *name, size_t *len)
++{
++	FILE *fp = fopen(name, "rb");
++	if (!fp)
++		return NULL;
++	fseek(fp, 0, SEEK_END);
++	long n = ftell(fp);
++	fseek(fp, 0, SEEK_SET);
++	uint8_t *b = n > 0 ? malloc((size_t)n + 1) : NULL;
++	if (b && fread(b, 1, (size_t)n, fp) != (size_t)n) {
++		free(b);
++		b = NULL;
++	}
++	fclose(fp);
++	if (b) {
++		b[n] = 0;
++		*len = (size_t)n;
++	}
++	return b;
++}
++
++static uint32_t replay_tex(const char *name)
++{
++	size_t len;
++	uint8_t *b = replay_file(name, &len);
++	if (!b || len < 54)
++		return 0;
++	uint32_t w, h;
++	memcpy(&w, b + 18, 4);
++	memcpy(&h, b + 22, 4);
++	uint32_t rowb = (w * 3 + 3) & ~3u;
++	uint8_t *px = malloc((size_t)w * h * 4);
++	for (uint32_t y = 0; y < h && px && 54 + (size_t)(h - 1 - y) * rowb + w * 3 <= len; y++)
++		for (uint32_t x = 0; x < w; x++) {
++			const uint8_t *q = b + 54 + (size_t)(h - 1 - y) * rowb + x * 3;
++			uint8_t *o = px + ((size_t)y * w + x) * 4;
++			o[0] = q[2]; o[1] = q[1]; o[2] = q[0]; o[3] = 255;
++		}
++	Nv2aSampler s = {.min_linear = 1, .mag_linear = 1, .wrap_s = 1, .wrap_t = 1};
++	uint32_t t = px ? vk_tex_new(w, h, px, &s) : 0;
++	free(px);
++	free(b);
++	return t;
++}
++
++static void replay_bmp(const char *name, uint32_t rt, int alpha)
++{
++	VkRT *r = &g_rt[rt - 1];
++	uint8_t *px = malloc((size_t)r->pw * r->ph * 4);
++	if (!px || !vk_target_read(rt, 0, 0, r->pw, r->ph, 0, px)) {
++		free(px);
++		return;
++	}
++	/* vk_target_read gives rows bottom-up; cap_bmp wants them top-down */
++	uint8_t *td = malloc((size_t)r->pw * r->ph * 4);
++	uint32_t lit = 0;
++	for (uint32_t y = 0; td && y < r->ph; y++)
++		for (uint32_t x = 0; x < r->pw; x++) {
++			const uint8_t *q = px + ((size_t)(r->ph - 1 - y) * r->pw + x) * 4;
++			uint8_t *o = td + ((size_t)y * r->pw + x) * 4;
++			if (alpha) { o[0] = o[1] = o[2] = q[3]; o[3] = 255; } else memcpy(o, q, 4);
++			lit += q[3] != 0;
++		}
++	if (td)
++		cap_bmp(name, td, r->pw, r->ph, 1280);
++	LOG("replay: %s, %u pixels with alpha\n", name, lit);
++	free(td);
++	free(px);
++}
++
++void nv2a_vk_replay(const char *list)
++{
++	size_t len;
++	char *txt = (char *)replay_file(list, &len);
++	if (!txt || !vk_init()) {
++		LOG("replay: no list %s\n", list);
++		free(txt);
++		return;
++	}
++	for (char *line = strtok(txt, "\n"); line; line = strtok(NULL, "\n")) {
++		char bin[128], vsn[128], fsn[128], tn[4][128], out[128];
++		int st[8] = {0, 0x302, 0x303, 0, 0, 0x203, 0, 0x405};
++		int fe = 0x900;
++		if (sscanf(line, "%127s %127s %127s %127s %127s %127s %127s %127s %d %x %x %d %d %x %d %x %x", bin, vsn, fsn,
++		           tn[0], tn[1], tn[2], tn[3], out, &st[0], &st[1], &st[2], &st[3], &st[4], &st[5], &st[6], &st[7],
++		           &fe) < 8)
++			continue;
++		size_t bl, vl, fl;
++		uint8_t *b = replay_file(bin, &bl);
++		char *vs = (char *)replay_file(vsn, &vl), *fs = (char *)replay_file(fsn, &fl);
++		if (!b || !vs || !fs || bl < 96) {
++			LOG("replay: %s: missing input\n", out);
++			free(b); free(vs); free(fs);
++			continue;
++		}
++		uint32_t hd[24];
++		memcpy(hd, b, sizeof hd);
++		uint32_t vus = hd[2], fus = hd[3], stride = hd[4], nv = hd[5];
++		int at[16];
++		for (int i = 0; i < 16; i++) at[i] = (int)hd[6 + i];
++		const uint8_t *vu = b + 96, *fu = vu + vus;
++		const float *gen = (const float *)(fu + fus), *verts = gen + 64;
++		int i;
++		for (i = 0; i < MAX_PROG && g_prog[i].used; i++)
++			;
++		if (i == MAX_PROG || 96 + vus + fus + 256 + (size_t)stride * nv * 4 > bl) {
++			free(b); free(vs); free(fs);
++			continue;
++		}
++		VkProg *p = &g_prog[i];
++		memset(p, 0, sizeof *p);
++		p->vs = compile_stage(vs, GLSLANG_STAGE_VERTEX, "replay");
++		p->fs = compile_stage(fs, GLSLANG_STAGE_FRAGMENT, "replay");
++		for (int a = 0; a < 16; a++) {
++			char pat[32];
++			snprintf(pat, sizeof pat, "in vec4 v%d;", a);
++			if (strstr(vs, pat)) p->inputs |= 1u << a;
++		}
++		for (int u = 0; u < 4; u++) {
++			char pat[48];
++			snprintf(pat, sizeof pat, "binding = %d) uniform sampler2D", 2 + u);
++			if (strstr(fs, pat)) p->samplers |= 1u << u;
++		}
++		p->vu_size = vus; p->fu_size = fus;
++		p->vu = malloc(vus ? vus : 16); p->fu = malloc(fus ? fus : 16);
++		memcpy(p->vu, vu, vus); memcpy(p->fu, fu, fus);
++		for (int s2 = 0; s2 < 2; s2++)
++			for (int u = 0; u < NV2A_U_COUNT; u++) p->off[s2][u] = -1;
++		p->dirty_v = p->dirty_f = 1;
++		p->used = p->vs && p->fs;
++		uint32_t tex[4] = {0};
++		for (int u = 0; u < 4; u++)
++			if (strcmp(tn[u], "-")) tex[u] = replay_tex(tn[u]);
++		uint32_t cmask = 0;
++		int aat[16];
++		for (int a = 0; a < 16; a++) {
++			aat[a] = at[a];
++			if (at[a] < 0) cmask |= 1u << a;
++		}
++		for (int var = 0; var < 2 && p->used; var++) {
++			uint32_t rt = vk_target_new(1280, 960);
++			vk_target_bind(rt);
++			float bg[4] = {0.2f, 0.2f, 0.2f, 0.0f};
++			vk_clear(7, bg, g_zrev ? 0.0f : 1.0f, 0, NULL);
++			memset(&g_rs, 0, sizeof g_rs);
++			g_rs.color_mask = 0x01010101u;
++			if (var) {
++				g_rs.blend_enable = st[0]; g_rs.blend_src = st[1]; g_rs.blend_dst = st[2];
++				g_rs.depth_test = st[3]; g_rs.depth_write = st[4]; g_rs.depth_func = st[5];
++				g_rs.cull_enable = st[6]; g_rs.cull_face = st[7]; g_rs.front_face = fe;
++			}
++			E.valid = 0;
++			vk_vertices(verts, nv, stride, aat, cmask, (const float (*)[4])gen);
++			g_cur_prog = (uint32_t)i + 1;
++			for (int u = 0; u < 4; u++) vk_texture(u, tex[u]);
++			vk_draw(NV2A_PRIM_TRIANGLES, nv / 3 * 3);
++			char name[192];
++			snprintf(name, sizeof name, "/app0/vkcap/%s_%c.bmp", out, var ? 'B' : 'A');
++			replay_bmp(name, rt, 0);
++			snprintf(name, sizeof name, "/app0/vkcap/%s_%c_alpha.bmp", out, var ? 'B' : 'A');
++			replay_bmp(name, rt, 1);
++			vk_target_free(rt);
++		}
++		if (!p->used) LOG("replay: %s: shaders did not compile\n", out);
++		vk_prog_free((uint32_t)i + 1);
++		for (int u = 0; u < 4; u++) if (tex[u]) vk_tex_free(tex[u]);
++		free(b); free(vs); free(fs);
++	}
++	free(txt);
++	submit(VK_NULL_HANDLE, VK_NULL_HANDLE, 1);
++	LOG("replay done\n");
 +}
 +
 +static const Nv2aGfx g_vk = {
