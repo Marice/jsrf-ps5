@@ -613,6 +613,13 @@ void __wrap___assert(const char* func, const char* file, int line,
    word. This catches the signal on a stack of its own, so a stack overflow is
    reported too, and logs where the fault happened: the instruction (rip), the
    address it touched, and the code addresses on the faulting stack. */
+/* The highest stack address a thread's fault report may read: a little above
+   the first frame we own on that thread (the trampoline below, or the
+   constructor that installs the handlers on the main thread). Reading on
+   past the top of a stack faulted inside the handler, before the report was
+   written (decision log D36). */
+static __thread uintptr_t t_stack_top;
+
 static void log_fault(int signal_number, siginfo_t* info, void* context)
 {
 	const ucontext_t* uc = (const ucontext_t*)context;
@@ -624,6 +631,7 @@ static void log_fault(int signal_number, siginfo_t* info, void* context)
 	        signal_number, (void*)rip, info ? info->si_addr : NULL, (void*)rsp);
 	fprintf(stderr, "jsrf: fault; reference log_stack=%p\n", (void*)reference);
 	fprintf(stderr, "jsrf:   stack[-1] %p\n", (void*)rip);
+	__real_fflush(stderr); /* the lines above reach the file even if the scan below faults */
 	/* The context layout on this console is not proven: a stall sample once
 	   reported rsp 0, and reading from there faulted inside this handler. The
 	   stack is only read when the pointer is plausible. */
@@ -634,8 +642,12 @@ static void log_fault(int signal_number, siginfo_t* info, void* context)
 		raise(signal_number);
 		return;
 	}
+	/* Up to the stack's top when it is known, else only to the end of the
+	   page rsp is on. */
+	const uintptr_t limit = t_stack_top > (uintptr_t)rsp
+		? t_stack_top : ((uintptr_t)rsp | 0x3fff) + 1;
 	int printed = 0;
-	for (int i = 0; i < 4096 && printed < 32; i++) {
+	for (int i = 0; i < 4096 && printed < 32 && (uintptr_t)&rsp[i + 1] <= limit; i++) {
 		const char* value = (const char*)rsp[i];
 		if (is_game_code(value)) {
 			fprintf(stderr, "jsrf:   stack[%d] %p\n", i, (void*)value);
@@ -668,6 +680,7 @@ static void install_fault_handlers(void)
 		if (sigaction(signals[i], &action, NULL) != 0)
 			fprintf(stderr, "jsrf: sigaction %d failed (errno %d)\n", signals[i], errno);
 	char here;
+	t_stack_top = (uintptr_t)&here + 64;
 	fprintf(stderr, "jsrf: fault handlers installed, main stack near %p\n", (void*)&here);
 
 	/* Only a little above this frame: start-up has used little of the stack
@@ -751,6 +764,7 @@ static void* thread_trampoline(void* opaque)
 	if (ss.ss_sp != NULL) sigaltstack(&ss, NULL);
 
 	char here;
+	t_stack_top = (uintptr_t)&here + 64;
 	fprintf(stderr, "jsrf: thread %d started, stack %zu KiB near %p\n",
 	        launch.number, launch.stack / 1024, (void*)&here);
 	spread_over_cores(launch.number);

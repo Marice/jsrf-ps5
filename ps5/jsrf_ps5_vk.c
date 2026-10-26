@@ -49,6 +49,8 @@ void jsrf_ps5_menu_prepare(const char *settings)
 	snprintf(v, sizeof v, "%d", scale);
 	setenv("RECOMP_GL_SCALE", v, 1);
 	setenv("RECOMP_WIDESCREEN", wide ? "1" : "0", 1);
+	/* RADV reads its options through our getenv (ps5-posix.c): its error messages into the log while V2 starts. */
+	setenv("MESA_DEBUG", "1", 0);
 	fprintf(stderr, "jsrf: Vulkan build: scale %d, widescreen %s (settings)\n", scale, wide ? "on" : "off");
 }
 
