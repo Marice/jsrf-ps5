@@ -1154,10 +1154,10 @@ index 20c9273..1f32680 100644
              g_is_gl = 0;
 diff --git a/src/nv2a_vk/nv2a_vk.c b/src/nv2a_vk/nv2a_vk.c
 new file mode 100644
-index 0000000..45d1831
+index 0000000..76e4a6c
 --- /dev/null
 +++ b/src/nv2a_vk/nv2a_vk.c
-@@ -0,0 +1,3292 @@
+@@ -0,0 +1,3382 @@
 +/*
 + * The NV2A renderer's device on Vulkan (nv2a_backend.h): the third backend,
 + * beside OpenGL (nv2a_gl/nv2a_gfx_gl.c) and Metal (nv2a_metal/nv2a_metal.m).
@@ -1206,6 +1206,12 @@ index 0000000..45d1831
 +#include <glslang/Public/resource_limits_c.h>
 +
 +#include "nv2a_backend.h"
++
++/* Where the capture and the replay keep their files: the title folder, or elsewhere when this file is built for a
++ * computer to replay a capture there (NV2A_VK_HOST, decision log D43). */
++#ifndef CAP_DIR
++#define CAP_DIR "/app0/vkcap"
++#endif
 +
 +VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vk_icdGetInstanceProcAddr(VkInstance instance, const char *name);
 +
@@ -2218,7 +2224,7 @@ index 0000000..45d1831
 +			const char *semi = memchr(s, ';', (size_t)(eol - s));
 +			const char *end = semi ? semi : eol;
 +			const char *st = skip_ws(s);
-+			char name[64];
++			char name[512];
 +			int count = 1;
 +			if (st >= end) {
 +				s = end + (semi ? 1 : 0);
@@ -2880,7 +2886,7 @@ index 0000000..45d1831
 +
 +static void tr_write_bmp(void)
 +{
-+	char name[96];
++	char name[512];
 +	uint32_t step = (g_trd.w + 511) / 512, w = g_trd.w / step, h = g_trd.h / step;
 +	snprintf(name, sizeof name, "/app0/vkdump/%02u_rt%u_%ux%u.bmp", g_trd.n, g_trd.rt, g_trd.w, g_trd.h);
 +	FILE *fp = fopen(name, "wb");
@@ -3182,12 +3188,12 @@ index 0000000..45d1831
 +		if (o >= 0) memcpy(&af, p->fu + o, 4);
 +		if (o2 >= 0) memcpy(&aref, p->fu + o2, 4);
 +		if (!g_cap.prog_seen[g_cur_prog - 1] && p->src_v && p->src_f) {
-+			char name[64];
++			char name[512];
 +			g_cap.prog_seen[g_cur_prog - 1] = 1;
-+			snprintf(name, sizeof name, "/app0/vkcap/c%d_p%u.vert", g_cap.n, g_cur_prog);
++			snprintf(name, sizeof name, CAP_DIR "/c%d_p%u.vert", g_cap.n, g_cur_prog);
 +			FILE *fp = fopen(name, "w");
 +			if (fp) { fputs(p->src_v, fp); fclose(fp); }
-+			snprintf(name, sizeof name, "/app0/vkcap/c%d_p%u.frag", g_cap.n, g_cur_prog);
++			snprintf(name, sizeof name, CAP_DIR "/c%d_p%u.frag", g_cap.n, g_cur_prog);
 +			fp = fopen(name, "w");
 +			if (fp) { fputs(p->src_f, fp); fclose(fp); }
 +		}
@@ -3195,8 +3201,8 @@ index 0000000..45d1831
 +	/* The draw's inputs, for working its shaders through off the console: the program's blocks as they were copied
 +	 * for this draw, the constant attributes, the layout and the first 16 vertices. */
 +	if (prog_ok(g_cur_prog) && d < 400) {
-+		char name[64];
-+		snprintf(name, sizeof name, "/app0/vkcap/c%d_d%u.bin", g_cap.n, d);
++		char name[512];
++		snprintf(name, sizeof name, CAP_DIR "/c%d_d%u.bin", g_cap.n, d);
 +		FILE *fp = fopen(name, "wb");
 +		if (fp) {
 +			VkProg *p = &g_prog[g_cur_prog - 1];
@@ -3262,13 +3268,13 @@ index 0000000..45d1831
 +			jsrf_vk_modes &= ~(uint32_t)JSRF_VK_CAPTURE;
 +			return;
 +		}
-+		mkdir("/app0/vkcap", 0777);
++		mkdir(CAP_DIR, 0777);
 +		g_cap.state = 2;
 +		g_cap.draws = g_cap.ntex = g_cap.used = 0;
 +		memset(g_cap.prog_seen, 0, sizeof g_cap.prog_seen);
 +		LOG("capture %d: from frame %llu\n", g_cap.n, (unsigned long long)n_frames + 1);
-+		char ename[64];
-+		snprintf(ename, sizeof ename, "/app0/vkcap/c%d_events.txt", g_cap.n);
++		char ename[512];
++		snprintf(ename, sizeof ename, CAP_DIR "/c%d_events.txt", g_cap.n);
 +		g_cap.ev = fopen(ename, "w");
 +		if (g_cap.ev) {
 +			fprintf(g_cap.ev, "zrev %d\n", g_zrev);
@@ -3315,12 +3321,12 @@ index 0000000..45d1831
 +{
 +	if (!g_cap.pending || g_cap.slot != slot)
 +		return;
-+	char name[64];
++	char name[512];
 +	for (uint32_t i = 0; i < g_cap.ntex; i++) {
-+		snprintf(name, sizeof name, "/app0/vkcap/c%d_t%u.bmp", g_cap.n, g_cap.tex[i].tex);
++		snprintf(name, sizeof name, CAP_DIR "/c%d_t%u.bmp", g_cap.n, g_cap.tex[i].tex);
 +		cap_bmp(name, g_cap.map + g_cap.tex[i].at, g_cap.tex[i].w, g_cap.tex[i].h, 128);
 +		/* and whole, for the frame replay: width, height, the sampler, the texels */
-+		snprintf(name, sizeof name, "/app0/vkcap/c%d_t%u.raw", g_cap.n, g_cap.tex[i].tex);
++		snprintf(name, sizeof name, CAP_DIR "/c%d_t%u.raw", g_cap.n, g_cap.tex[i].tex);
 +		FILE *fp = fopen(name, "wb");
 +		if (fp) {
 +			fwrite(&g_cap.tex[i].w, 4, 1, fp);
@@ -3331,7 +3337,7 @@ index 0000000..45d1831
 +		}
 +	}
 +	if (g_cap.frame_w) {
-+		snprintf(name, sizeof name, "/app0/vkcap/c%d_frame.bmp", g_cap.n);
++		snprintf(name, sizeof name, CAP_DIR "/c%d_frame.bmp", g_cap.n);
 +		cap_bmp(name, g_cap.map + g_cap.frame_at, g_cap.frame_w, g_cap.frame_h, 960);
 +	}
 +	LOG("capture %d written to /app0/vkcap\n", g_cap.n);
@@ -3775,7 +3781,11 @@ index 0000000..45d1831
 +	VkApplicationInfo app = {.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = "jsrf",
 +	                         .apiVersion = VK_API_VERSION_1_3};
 +	VkInstanceCreateInfo ii = {.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &app,
++#if defined(NV2A_VK_HOST)
++	                           .enabledExtensionCount = 0, .ppEnabledExtensionNames = exts};
++#else
 +	                           .enabledExtensionCount = 2, .ppEnabledExtensionNames = exts};
++#endif
 +	VkResult ir = vkCreateInstance ? vkCreateInstance(&ii, NULL, &g_instance) : VK_ERROR_INITIALIZATION_FAILED;
 +	LOG("instance: result %d\n", ir);
 +	if (ir != VK_SUCCESS) {
@@ -3819,7 +3829,11 @@ index 0000000..45d1831
 +	                                        .synchronization2 = VK_TRUE, .dynamicRendering = VK_TRUE};
 +	const char *const dexts[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
 +	VkDeviceCreateInfo di = {.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &f13, .queueCreateInfoCount = 1,
++#if defined(NV2A_VK_HOST)
++	                         .pQueueCreateInfos = &qi, .enabledExtensionCount = 0, .ppEnabledExtensionNames = dexts,
++#else
 +	                         .pQueueCreateInfos = &qi, .enabledExtensionCount = 1, .ppEnabledExtensionNames = dexts,
++#endif
 +	                         .pEnabledFeatures = &want};
 +	VkResult r = vkCreateDevice(g_phys, &di, NULL, &g_dev);
 +	if (r != VK_SUCCESS) {
@@ -3836,6 +3850,9 @@ index 0000000..45d1831
 +
 +static int create_swapchain(void)
 +{
++#if defined(NV2A_VK_HOST)
++	return 1; /* a replay on a computer shows nothing */
++#endif
 +	VkDisplayPropertiesKHR display;
 +	uint32_t count = 1;
 +	if (vkGetPhysicalDeviceDisplayPropertiesKHR(g_phys, &count, &display) != VK_SUCCESS || count < 1) {
@@ -3884,16 +3901,21 @@ index 0000000..45d1831
 +
 +static int create_layouts(void)
 +{
-+	VkDescriptorSetLayoutBinding b[3] = {
++	/* The texture units are four bindings of one sampler each, 2 to 5, as the shaders declare them (vulkanize). One
++	 * binding of four made units 1 to 3 bindings the layout did not have: RADV read some other descriptor there --
++	 * the graffiti pieces, the cel-shaded characters' second texture, the boost haze (decision log D44). The
++	 * descriptor write of four from binding 2 rolls over into 3, 4 and 5, which have the same type and stages. */
++	VkDescriptorSetLayoutBinding b[6] = {
 +		{0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
 +		 NULL},
 +		{1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
 +		 NULL},
-+		{2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4, VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_VERTEX_BIT,
-+		 NULL},
 +	};
++	for (uint32_t u = 0; u < 4; u++)
++		b[2 + u] = (VkDescriptorSetLayoutBinding){2 + u, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
++		                                          VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_VERTEX_BIT, NULL};
 +	VkDescriptorSetLayoutCreateInfo li = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-+	                                      .bindingCount = 3, .pBindings = b};
++	                                      .bindingCount = 6, .pBindings = b};
 +	if (vkCreateDescriptorSetLayout(g_dev, &li, NULL, &g_set_layout) != VK_SUCCESS)
 +		return 0;
 +	VkPipelineLayoutCreateInfo pl = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1,
@@ -4104,10 +4126,17 @@ index 0000000..45d1831
 +/* A whole captured frame again (decision log D43): its events in order -- targets bound, clears, draws -- through this
 + * backend, with each draw's own state, inputs and textures, and the presented target written as rf<n>.bmp. */
 +#define RF_MAP 512
-+static void replay_frame(int n)
++/* `mode`: "full"; "only=N" draws only draw N; "stop=N" stops after draw N; "sync" finishes each draw before the
++ * next; "fresh" forgets the dynamic state and the descriptor set before each draw; "noset" the descriptor set only. */
++static void replay_frame(int n, const char *mode)
 +{
-+	char name[96];
-+	snprintf(name, sizeof name, "/app0/vkcap/c%d_events.txt", n);
++	int only = -1, stop = -1, msync = !strcmp(mode, "sync"), fresh = !strcmp(mode, "fresh"),
++	    noset = !strcmp(mode, "noset");
++	sscanf(mode, "only=%d", &only);
++	sscanf(mode, "stop=%d", &stop);
++	int stopped = 0;
++	char name[512];
++	snprintf(name, sizeof name, CAP_DIR "/c%d_events.txt", n);
 +	size_t len;
 +	char *ev = (char *)replay_file(name, &len);
 +	if (!ev) {
@@ -4149,7 +4178,13 @@ index 0000000..45d1831
 +			if (k >= 7 && cur)
 +				vk_clear(mask, rgba, depth, st, k == 11 ? r : NULL);
 +		} else if (sscanf(line, "draw %u %u %u", &a, &b, &c) == 3) {
-+			snprintf(name, sizeof name, "/app0/vkcap/c%d_d%u.bin", n, a);
++			if (stopped || (only >= 0 && (int)a != only))
++				continue;
++			if (stop >= 0 && (int)a > stop)
++				stopped = 1;
++			if (stopped)
++				continue;
++			snprintf(name, sizeof name, CAP_DIR "/c%d_d%u.bin", n, a);
 +			size_t bl;
 +			uint8_t *bin = replay_file(name, &bl);
 +			if (!bin || bl < 100 || ((uint32_t *)bin)[0] != 0x32504143u) {
@@ -4180,9 +4215,9 @@ index 0000000..45d1831
 +				;
 +			if (i == nprog && nprog < RF_MAP) {
 +				size_t vl, fl;
-+				snprintf(name, sizeof name, "/app0/vkcap/c%d_p%u.vert", n, hd[1]);
++				snprintf(name, sizeof name, CAP_DIR "/c%d_p%u.vert", n, hd[1]);
 +				char *vs = (char *)replay_file(name, &vl);
-+				snprintf(name, sizeof name, "/app0/vkcap/c%d_p%u.frag", n, hd[1]);
++				snprintf(name, sizeof name, CAP_DIR "/c%d_p%u.frag", n, hd[1]);
 +				char *fs = (char *)replay_file(name, &fl);
 +				uint32_t slot;
 +				for (slot = 0; slot < MAX_PROG && g_prog[slot].used; slot++)
@@ -4239,7 +4274,7 @@ index 0000000..45d1831
 +				for (k = 0; k < ntex && tex_from[k] != bound[u]; k++)
 +					;
 +				if (k == ntex && ntex < RF_MAP) {
-+					snprintf(name, sizeof name, "/app0/vkcap/c%d_t%u.raw", n, bound[u]);
++					snprintf(name, sizeof name, CAP_DIR "/c%d_t%u.raw", n, bound[u]);
 +					size_t tl;
 +					uint8_t *raw = replay_file(name, &tl);
 +					tex_from[ntex] = bound[u];
@@ -4266,10 +4301,56 @@ index 0000000..45d1831
 +				if (at16[at] < 0) cmask |= 1u << at;
 +			}
 +			g_rs = rs;
++			{
++				/* JSRF_RF_STRIP: parts of each draw's state left out, to find the one at fault: 1 stencil, 2 blend,
++				 * 4 depth, 8 culling, 16 the colour mask (all channels), 32 every unit but the first */
++				const char *v = getenv("JSRF_RF_STRIP");
++				unsigned strip = v ? (unsigned)strtoul(v, NULL, 0) : 0;
++				if (strip & 1) g_rs.stencil_test = 0;
++				if (strip & 2) g_rs.blend_enable = 0;
++				if (strip & 4) g_rs.depth_test = g_rs.depth_write = 0;
++				if (strip & 8) g_rs.cull_enable = 0;
++				if (strip & 16) g_rs.color_mask = 0x01010101u;
++				if (strip & 32) tx[1] = tx[2] = tx[3] = 0;
++				if (strip & 64) tx[0] = tx[1] = tx[2] = tx[3] = 0;
++			}
 +			vk_vertices(verts, nv, stride, at16, cmask, (const float (*)[4])gen);
 +			g_cur_prog = ph;
 +			for (int u = 0; u < 4; u++) vk_texture(u, tx[u]);
-+			vk_draw((int)hd[22], nv < hd[23] ? nv : hd[23]);
++			{
++				/* JSRF_RF_SYNC: each draw finished before the next, to find one that faults; JSRF_RF_SKIP=a,b: leave
++				 * out the draws numbered a to b */
++				static int sync = -1;
++				static unsigned skip_a = 1, skip_b = 0;
++				if (sync < 0) {
++					const char *v = getenv("JSRF_RF_SYNC");
++					sync = v && *v == '1';
++					v = getenv("JSRF_RF_SKIP");
++					if (v)
++						sscanf(v, "%u,%u", &skip_a, &skip_b);
++				}
++				if (a >= skip_a && a <= skip_b) {
++					free(bin);
++					continue;
++				}
++				if (sync)
++					LOG("replay frame %d: draw %u (p%u prim %u n %u)\n", n, a, hd[1], hd[22], hd[23]);
++				if (fresh) {
++					pass_end();
++					E.valid = 0;
++				}
++				if (fresh || noset)
++					g_set = VK_NULL_HANDLE;
++				uint32_t cnt = nv < hd[23] ? nv : hd[23];
++				{
++					const char *v = getenv("JSRF_RF_NV"); /* at most this many vertices a draw */
++					if (v && (uint32_t)atoi(v) < cnt)
++						cnt = (uint32_t)atoi(v) / 3 * 3;
++				}
++				vk_draw((int)hd[22], cnt);
++				if (sync || msync)
++					submit(VK_NULL_HANDLE, VK_NULL_HANDLE, 1);
++			}
 +			draws++;
 +			free(bin);
 +		} else if (sscanf(line, "present %u", &a) == 1) {
@@ -4281,13 +4362,21 @@ index 0000000..45d1831
 +			(void)i;
 +			for (uint32_t k = 0; k < nrt; k++)
 +				if (rt_to[k]) {
-+					snprintf(name, sizeof name, "/app0/vkcap/rf%d_rt%u.bmp", n, rt_from[k]);
++					snprintf(name, sizeof name, CAP_DIR "/rf%d_%s_rt%u.bmp", n, mode, rt_from[k]);
 +					replay_bmp(name, rt_to[k], 0);
 +				}
 +		}
 +	}
-+	LOG("replay frame %d: %u draws, %u failed, %u targets, %u textures, %u programs\n", n, draws, failed, nrt, ntex,
-+	    nprog);
++	if (stopped || only >= 0) {
++		/* the targets as they stand where the replay stopped */
++		for (uint32_t k = 0; k < nrt; k++)
++			if (rt_to[k]) {
++				snprintf(name, sizeof name, CAP_DIR "/rf%d_%s_rt%u.bmp", n, mode, rt_from[k]);
++				replay_bmp(name, rt_to[k], 0);
++			}
++	}
++	LOG("replay frame %d (%s): %u draws, %u failed, %u targets, %u textures, %u programs\n", n, mode, draws, failed,
++	    nrt, ntex, nprog);
 +	g_zrev = keep_zrev;
 +	g_cur_prog = 0;
 +	free(ev);
@@ -4306,8 +4395,9 @@ index 0000000..45d1831
 +	for (char *line = strtok_r(txt, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
 +		char bin[128], vsn[128], fsn[128], tn[4][128], out[128];
 +		int fr;
-+		if (sscanf(line, "frame %d", &fr) == 1) {
-+			replay_frame(fr);
++		char fmode[64] = "full";
++		if (sscanf(line, "frame %d %63s", &fr, fmode) >= 1) {
++			replay_frame(fr, fmode);
 +			continue;
 +		}
 +		int st[8] = {0, 0x302, 0x303, 0, 0, 0x203, 0, 0x405};
@@ -4396,8 +4486,8 @@ index 0000000..45d1831
 +			g_cur_prog = (uint32_t)i + 1;
 +			for (int u = 0; u < 4; u++) vk_texture(u, tex[u]);
 +			vk_draw(NV2A_PRIM_TRIANGLES, nv / 3 * 3);
-+			char name[192];
-+			snprintf(name, sizeof name, "/app0/vkcap/%s_%c.bmp", out, 'A' + var);
++			char name[512];
++			snprintf(name, sizeof name, CAP_DIR "/%s_%c.bmp", out, 'A' + var);
 +			replay_bmp(name, rt, 0);
 +			/* the targets, textures and program stay: freeing them here crashed in the next frame_start, and the
 +			 * replay runs once */
