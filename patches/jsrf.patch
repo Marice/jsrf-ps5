@@ -1154,10 +1154,10 @@ index 20c9273..1f32680 100644
              g_is_gl = 0;
 diff --git a/src/nv2a_vk/nv2a_vk.c b/src/nv2a_vk/nv2a_vk.c
 new file mode 100644
-index 0000000..1df9928
+index 0000000..e8ee01d
 --- /dev/null
 +++ b/src/nv2a_vk/nv2a_vk.c
-@@ -0,0 +1,2791 @@
+@@ -0,0 +1,2807 @@
 +/*
 + * The NV2A renderer's device on Vulkan (nv2a_backend.h): the third backend,
 + * beside OpenGL (nv2a_gl/nv2a_gfx_gl.c) and Metal (nv2a_metal/nv2a_metal.m).
@@ -2175,6 +2175,12 @@ index 0000000..1df9928
 +		if (first) {
 +			/* the version line: 450, which takes explicit locations and bindings */
 +			str_add(&out, "#version 450\n", 13);
++			/* The position computed exactly as written (D42): RADV may fuse a multiply and an add into one
++			 * instruction, which rounds differently, and not alike in every program -- a decal drawn by a vertex
++			 * program over a wall drawn by the fixed-function transform then lands a hair behind the wall's depth
++			 * and loses the depth test pixel by pixel (the graffiti). */
++			if (!frag)
++				str_add(&out, "precise gl_Position;\n", 21);
 +			first = 0;
 +			line = *eol ? eol + 1 : eol;
 +			continue;
@@ -2187,6 +2193,16 @@ index 0000000..1df9928
 +		}
 +		if (*t == '#' || !(!strncmp(t, "uniform ", 8) || !strncmp(t, "in ", 3) || !strncmp(t, "out ", 4) ||
 +		                   !strncmp(t, "flat ", 5) || !strncmp(t, "smooth ", 7) || !strncmp(t, "noperspective ", 14))) {
++			/* ... and every value on the way to it: a local float variable of the vertex stage made precise (an
++			 * indented declaration, not a function's head). */
++			if (!frag && t > line &&
++			    (!strncmp(t, "vec4 ", 5) || !strncmp(t, "vec3 ", 5) || !strncmp(t, "vec2 ", 5) || !strncmp(t, "float ", 6))) {
++				const char *e = t;
++				while (e < eol && *e != '=' && *e != ';' && *e != '(')
++					e++;
++				if (e < eol && *e != '(')
++					str_add(&out, "precise ", 8);
++			}
 +			str_add(&out, line, (size_t)(eol - line) + (*eol ? 1 : 0));
 +			line = *eol ? eol + 1 : eol;
 +			continue;
