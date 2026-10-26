@@ -1138,10 +1138,10 @@ index 75b66db..ead1dea 100644
              g_is_gl = 0;
 diff --git a/src/nv2a_vk/nv2a_vk.c b/src/nv2a_vk/nv2a_vk.c
 new file mode 100644
-index 0000000..fc4d47d
+index 0000000..3817597
 --- /dev/null
 +++ b/src/nv2a_vk/nv2a_vk.c
-@@ -0,0 +1,2024 @@
+@@ -0,0 +1,2071 @@
 +/*
 + * The NV2A renderer's device on Vulkan (nv2a_backend.h): the third backend,
 + * beside OpenGL (nv2a_gl/nv2a_gfx_gl.c) and Metal (nv2a_metal/nv2a_metal.m).
@@ -3130,6 +3130,53 @@ index 0000000..fc4d47d
 +	LOG("up in %.0f ms: swapchain %ux%u, %u images\n", now_ms() - t0, SWAP_W, SWAP_H, g_swap_n);
 +	done = g_black != 0;
 +	return done;
++}
++
++/*
++ * jsrf-ps5: a picture made on the CPU (the start menu, decision log D37) shown before the engine runs. The display
++ * can be opened once, so the device and swapchain opened here are the ones the renderer gets later (vk_init runs
++ * once). `rgba` is w x h, scaled to the whole swapchain texel for texel (a whole multiple keeps the letters sharp).
++ */
++int nv2a_vk_show(const void *rgba, uint32_t w, uint32_t h)
++{
++	if (!vk_init())
++		return 0;
++	Nv2aSampler s = {0};
++	uint32_t t = vk_tex_new(w, h, rgba, &s);
++	if (!t)
++		return 0;
++	Frame *f = &g_fr[g_slot];
++	uint32_t img = 0;
++	VkResult r = vkAcquireNextImageKHR(g_dev, g_swap, UINT64_MAX, f->acquired, VK_NULL_HANDLE, &img);
++	if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) {
++		LOG("acquire failed (%d)\n", r);
++		vk_tex_free(t);
++		submit(VK_NULL_HANDLE, VK_NULL_HANDLE, 1);
++		return 0;
++	}
++	VkCommandBuffer c = cmd();
++	barrier_all(c);
++	image_layout(c, g_swap_img[img], VK_IMAGE_ASPECT_COLOR_BIT, 1, VK_IMAGE_LAYOUT_UNDEFINED,
++	             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
++	image_layout(c, g_tex[t - 1].image, VK_IMAGE_ASPECT_COLOR_BIT, 1, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
++	             VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
++	VkImageBlit b = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
++	                 .srcOffsets = {{0, 0, 0}, {(int32_t)w, (int32_t)h, 1}},
++	                 .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
++	                 .dstOffsets = {{0, 0, 0}, {SWAP_W, SWAP_H, 1}}};
++	vkCmdBlitImage(c, g_tex[t - 1].image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, g_swap_img[img],
++	               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &b, VK_FILTER_NEAREST);
++	image_layout(c, g_swap_img[img], VK_IMAGE_ASPECT_COLOR_BIT, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
++	             VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
++	submit(f->acquired, g_rendered[img], 0);
++	VkPresentInfoKHR pi = {.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .waitSemaphoreCount = 1,
++	                       .pWaitSemaphores = &g_rendered[img], .swapchainCount = 1, .pSwapchains = &g_swap,
++	                       .pImageIndices = &img};
++	r = vkQueuePresentKHR(g_queue, &pi);
++	vk_tex_free(t); /* on this frame's dead list: freed once the GPU has done the frame */
++	g_slot = (g_slot + 1) % FRAMES;
++	frame_start();
++	return r == VK_SUCCESS || r == VK_SUBOPTIMAL_KHR;
 +}
 +
 +static const Nv2aGfx g_vk = {

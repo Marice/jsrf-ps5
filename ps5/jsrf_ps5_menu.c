@@ -4,7 +4,11 @@
  * It counts down five seconds and starts with the last choices; X opens the rows. The engine's own keys (scale,
  * widescreen) are upstream's, which nv2a_gl.c reads when the renderer starts; ps5_output is ours (upstream's reader
  * passes over keys it does not know). The pad is read straight from scePad, and closed again before the engine, whose
- * SDL opens it for the game. */
+ * SDL opens it for the game.
+ *
+ * The Vulkan build (D37) has no output-resolution row: it renders at the scale and fills the 4K display itself. Its
+ * engine has no SDL window to read the settings file, so the choices go to it through RECOMP_GL_SCALE and
+ * RECOMP_WIDESCREEN. */
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -12,7 +16,15 @@
 #include <time.h>
 #include <unistd.h>
 
+#if defined(JSRF_PS5_RADV)
+static int jsrf_ps5_display_mode(int height)
+{
+	(void)height; /* the Vulkan build's display is 4K */
+	return 0;
+}
+#else
 int jsrf_ps5_display_mode(int height); /* jsrf_ps5_gl.c */
+#endif
 void jsrf_ps5_screen_menu(const char *title, const char *subtitle, const char *const *labels,
                           const char *const *values, int count, int selected, const char *footer);
 
@@ -131,7 +143,19 @@ static double now_s(void)
 }
 
 static const int kOutputs[] = {1080, 1440, 2160};
+#if defined(JSRF_PS5_RADV)
+enum { ROW_OUTPUT = -1, ROW_SCALE, ROW_WIDE, ROW_START, ROWS };
+#else
 enum { ROW_OUTPUT, ROW_SCALE, ROW_WIDE, ROW_START, ROWS };
+#endif
+
+/* The most the scale row offers: 6x in the Vulkan build (3840x2880, in widescreen 3840x2160, the 4K screen pixel
+ * for pixel, as upstream's own menus since 0.5.7); 4x in the OpenGL build, where every draw is already the limit. */
+#if defined(JSRF_PS5_RADV)
+#define SCALE_MAX 6
+#else
+#define SCALE_MAX 4
+#endif
 
 static int g_output = 2160, g_scale = 4, g_wide = 1;
 
@@ -142,7 +166,7 @@ void jsrf_ps5_menu_prepare(const char *settings)
 	if (g_output != 1080 && g_output != 1440)
 		g_output = 2160;
 	g_scale = cfg_get(settings, "scale", 4);
-	if (g_scale < 1 || g_scale > 4)
+	if (g_scale < 1 || g_scale > SCALE_MAX)
 		g_scale = 4;
 	g_wide = cfg_get(settings, "widescreen", 1) != 0;
 	jsrf_ps5_display_mode(g_output);
@@ -153,7 +177,11 @@ void jsrf_ps5_menu_prepare(const char *settings)
 /* The menu; returns when the game is to start, with the choices written to the settings file. */
 void jsrf_ps5_menu(const char *settings)
 {
+#if defined(JSRF_PS5_RADV)
+	static const char *const labels[ROWS] = {"SCALE", "WIDESCREEN", "START GAME"};
+#else
 	static const char *const labels[ROWS] = {"RESOLUTION", "SCALE", "WIDESCREEN", "START GAME"};
+#endif
 	char output[32], scale[32];
 	const char *values[ROWS];
 	char footer[96];
@@ -199,7 +227,7 @@ void jsrf_ps5_menu(const char *settings)
 					jsrf_ps5_display_mode(g_output);
 				}
 			} else if (step && selected == ROW_SCALE) {
-				g_scale = (g_scale - 1 + 4 + step) % 4 + 1;
+				g_scale = (g_scale - 1 + SCALE_MAX + step) % SCALE_MAX + 1;
 			} else if (step && selected == ROW_WIDE) {
 				g_wide = !g_wide;
 			}
@@ -208,7 +236,9 @@ void jsrf_ps5_menu(const char *settings)
 		snprintf(output, sizeof output, "%dP", g_output);
 		/* the Xbox's 640x480 times the scale; wider in 16:9 */
 		snprintf(scale, sizeof scale, "%dX  (%dX%d)", g_scale, (g_wide ? 853 : 640) * g_scale, 480 * g_scale);
+#if !defined(JSRF_PS5_RADV)
 		values[ROW_OUTPUT] = output;
+#endif
 		values[ROW_SCALE] = scale;
 		values[ROW_WIDE] = g_wide ? "ON" : "OFF";
 		values[ROW_START] = NULL;
@@ -221,6 +251,11 @@ void jsrf_ps5_menu(const char *settings)
 	cfg_put(settings, keys, kept, 3);
 	fprintf(stderr, "jsrf: menu: starting with output %dp, scale %d, widescreen %s\n", g_output, g_scale,
 	        g_wide ? "on" : "off");
+#if defined(JSRF_PS5_RADV)
+	snprintf(scale, sizeof scale, "%d", g_scale);
+	setenv("RECOMP_GL_SCALE", scale, 1);
+	setenv("RECOMP_WIDESCREEN", g_wide ? "1" : "0", 1);
+#endif
 	if (g_pad_ours)
 		scePadClose(g_pad); /* the game's SDL opens it */
 	g_pad = -1;

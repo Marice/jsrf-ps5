@@ -1,12 +1,16 @@
 /* JSRF for PS5, the Vulkan build: what jsrf_ps5_gl.c and jsrf_ps5_screen.c are to the OpenGL build.
  *
- * Phase V1 (decision log D34): the game on Mihawk's RADV toolchain with no renderer yet, so there is no screen. The
- * status lines go to the log only; the swapchain that shows them, and the game, comes with the Vulkan device (V2). */
+ * The game on Mihawk's RADV toolchain (decision log D34) with the Vulkan renderer (D36); the status screen and the
+ * start menu are jsrf_ps5_screen.c's and jsrf_ps5_menu.c's, as in the OpenGL build (D37). */
 #include <stdio.h>
+#include <stdlib.h>
 
+/* The status screen and the start menu draw through the Vulkan device (jsrf_ps5_screen.c, D37), which opens the
+ * display when it first shows something. */
 int jsrf_ps5_status_begin(void)
 {
-	fprintf(stderr, "jsrf: Vulkan build, phase V1: no screen yet\n");
+	/* RADV reads its options through our getenv (ps5-posix.c): its error messages into the log. */
+	setenv("MESA_DEBUG", "1", 0);
 	return 0;
 }
 
@@ -17,55 +21,6 @@ void jsrf_ps5_status_end(void)
 int jsrf_ps5_gl_prepare(void)
 {
 	return 0;
-}
-
-/* The start menu (D35) needs the screen: until V2 the game starts with the settings file as it is. */
-#include <stdlib.h>
-#include <string.h>
-
-static int setting(const char *path, const char *key, int def)
-{
-	char line[128];
-	size_t kl = strlen(key);
-	int v = def;
-	FILE *f = fopen(path, "r");
-	if (!f)
-		return def;
-	while (fgets(line, sizeof line, f))
-		if (!strncmp(line, key, kl) && line[kl] == '=')
-			v = atoi(line + kl + 1);
-	fclose(f);
-	return v;
-}
-
-/* The kept scale and widescreen into the engine's own variables: in the OpenGL build its SDL window reads the
- * settings file, which this build does not have (nv2a_gl.c, RECOMP_GL_SCALE and RECOMP_WIDESCREEN). */
-void jsrf_ps5_menu_prepare(const char *settings)
-{
-	char v[16];
-	int scale = setting(settings, "scale", 4), wide = setting(settings, "widescreen", 1);
-	if (scale < 1 || scale > 4)
-		scale = 4;
-	snprintf(v, sizeof v, "%d", scale);
-	setenv("RECOMP_GL_SCALE", v, 1);
-	setenv("RECOMP_WIDESCREEN", wide ? "1" : "0", 1);
-	/* RADV reads its options through our getenv (ps5-posix.c): its error messages into the log while V2 starts. */
-	setenv("MESA_DEBUG", "1", 0);
-	fprintf(stderr, "jsrf: Vulkan build: scale %d, widescreen %s (settings)\n", scale, wide ? "on" : "off");
-}
-
-void jsrf_ps5_menu(const char *settings)
-{
-	(void)settings;
-}
-
-void jsrf_ps5_screen_lines(const char *title, const char *const *lines, const int *pass, int count)
-{
-	(void)pass;
-	fprintf(stderr, "jsrf: screen: %s", title);
-	for (int i = 0; i < count; i++)
-		if (lines[i]) fprintf(stderr, " | %s", lines[i]);
-	fputc('\n', stderr);
 }
 
 /* The OpenGL build's present timing (nv2a_gl.c, D13), which the ack thread reports every few seconds: there is no
