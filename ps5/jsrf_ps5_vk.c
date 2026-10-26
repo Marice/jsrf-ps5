@@ -11,10 +11,6 @@ int jsrf_ps5_status_begin(void)
 {
 	/* RADV reads its options through our getenv (ps5-posix.c): its error messages into the log. */
 	setenv("MESA_DEBUG", "1", 0);
-	/* The V3 measurement run (D40): the graffiti surfaces traced, and fast clears off so that what is read back is
-	 * what was drawn, not memory from before a clear. */
-	setenv("JSRF_VK_SURFTRACE", "1", 0);
-	setenv("RADV_DEBUG", "nofastclears", 0);
 	return 0;
 }
 
@@ -207,4 +203,93 @@ int nv_window_pref_smaa(void)
 int nv_window_pref_msaa(void)
 {
 	return 0;
+}
+
+/* ---- the test modes, switched in the game (decision log D41) ----
+ * Hold the touchpad: the list shows top left; up and down choose a mode, left, right or X switch it. The modes live in
+ * memory only (nothing is written to the SSD); their start values are the settings file's vk_modes. The pad is the one
+ * SDL opened, read with scePadReadState, which takes no samples away from it. */
+#include <stdint.h>
+
+extern uint32_t jsrf_vk_modes;                                         /* src/nv2a_vk/nv2a_vk.c */
+void nv2a_vk_overlay(const void *rgba, uint32_t w, uint32_t h);       /* src/nv2a_vk/nv2a_vk.c */
+void jsrf_ps5_text_rgba(uint32_t *buf, int w, int h, const char *const *lines, const uint32_t *colors, int count);
+
+typedef struct {
+	uint32_t buttons;
+	uint8_t rest[116];
+} mode_pad_state;
+int sceUserServiceGetInitialUser(int32_t *);
+int sceUserServiceGetForegroundUser(int32_t *);
+int scePadGetHandle(int32_t user, int type, int index);
+int scePadReadState(int handle, mode_pad_state *data);
+
+enum { MP_UP = 0x10, MP_RIGHT = 0x20, MP_DOWN = 0x40, MP_LEFT = 0x80, MP_CROSS = 0x4000, MP_TOUCH = 0x100000 };
+static const struct { uint32_t bit; const char *name; } kModes[] = {
+	{1, "RESOLVE BEFORE SAMPLING"}, {2, "NEW TARGETS ALPHA 1"}, {4, "NO CULLING"}, {8, "SURFACE TRACE"},
+};
+enum { N_MODES = sizeof kModes / sizeof kModes[0], OVL_W = 384, OVL_H = 6 + 18 * (N_MODES + 1) + 4 };
+
+void jsrf_ps5_frame_hook(void)
+{
+	static int pad = -1, cursor;
+	static unsigned frame, hide_at, tries;
+	static uint32_t before, shown_key = ~0u;
+	static uint32_t pic[OVL_W * OVL_H];
+	frame++;
+	if (pad < 0) {
+		int32_t user = -1;
+		if (tries++ % 120 != 0)
+			return;
+		if (sceUserServiceGetInitialUser(&user) != 0 && sceUserServiceGetForegroundUser(&user) != 0)
+			return;
+		pad = scePadGetHandle(user, 0, 0);
+		if (pad < 0)
+			return;
+		fprintf(stderr, "jsrf: test modes: pad handle %d; modes %x (hold the touchpad to change them)\n", pad,
+		        jsrf_vk_modes);
+	}
+	mode_pad_state st;
+	if (scePadReadState(pad, &st) != 0)
+		return;
+	uint32_t held = st.buttons & 0x7FFFFFFFu, pressed = held & ~before;
+	before = held;
+	if (held & MP_TOUCH) {
+		if (pressed & MP_UP)
+			cursor = (cursor + N_MODES - 1) % N_MODES;
+		if (pressed & MP_DOWN)
+			cursor = (cursor + 1) % N_MODES;
+		if (pressed & (MP_LEFT | MP_RIGHT | MP_CROSS)) {
+			jsrf_vk_modes ^= kModes[cursor].bit;
+			fprintf(stderr, "jsrf: test modes: %s %s (modes %x)\n", kModes[cursor].name,
+			        (jsrf_vk_modes & kModes[cursor].bit) ? "on" : "off", jsrf_vk_modes);
+		}
+		hide_at = frame + 120;
+	}
+	if (frame >= hide_at) {
+		if (shown_key != ~0u) {
+			nv2a_vk_overlay(NULL, 0, 0);
+			shown_key = ~0u;
+		}
+		return;
+	}
+	uint32_t key = jsrf_vk_modes << 8 | (uint32_t)cursor;
+	if (key == shown_key)
+		return;
+	char text[N_MODES + 1][48];
+	const char *lines[N_MODES + 1];
+	uint32_t colors[N_MODES + 1];
+	snprintf(text[0], sizeof text[0], "TEST MODES  %X", jsrf_vk_modes);
+	colors[0] = 0xFF33C8FFu; /* yellow */
+	for (int i = 0; i < N_MODES; i++) {
+		int on = (jsrf_vk_modes & kModes[i].bit) != 0;
+		snprintf(text[i + 1], sizeof text[i + 1], "%s%-24s %s", i == cursor ? "> " : "  ", kModes[i].name,
+		         on ? "ON" : "OFF");
+		colors[i + 1] = on ? 0xFF73E666u : 0xFFD0D0D0u; /* green when on */
+	}
+	for (int i = 0; i <= N_MODES; i++)
+		lines[i] = text[i];
+	jsrf_ps5_text_rgba(pic, OVL_W, OVL_H, lines, colors, N_MODES + 1);
+	nv2a_vk_overlay(pic, OVL_W, OVL_H);
+	shown_key = key;
 }

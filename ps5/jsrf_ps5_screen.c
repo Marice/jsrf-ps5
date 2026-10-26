@@ -60,6 +60,33 @@ static void canvas_end(void)
 		g_shown_hash = hash;
 }
 
+/* The Vulkan build's test-mode indicator (D41): lines of text into a w x h picture, two pixels a font pixel, each
+ * line in its own colour, on a dark ground; nv2a_vk_overlay shows it. */
+static const unsigned char *glyph(char c);
+
+void jsrf_ps5_text_rgba(uint32_t *buf, int w, int h, const char *const *lines, const uint32_t *colors, int count)
+{
+	for (int i = 0; i < w * h; i++)
+		buf[i] = 0xE0181410u;
+	for (int l = 0; l < count; l++) {
+		int y0 = 6 + l * 18, x0 = 6;
+		for (const char *c = lines[l]; *c; c++, x0 += 12) {
+			const unsigned char *g = glyph(*c);
+			for (int row = 0; g && row < 7; row++)
+				for (int col = 0; col < 5; col++) {
+					if (!(g[row] & (16 >> col)))
+						continue;
+					for (int dy = 0; dy < 2; dy++)
+						for (int dx = 0; dx < 2; dx++) {
+							int x = x0 + col * 2 + dx, y = y0 + row * 2 + dy;
+							if (x < w && y < h)
+								buf[y * w + x] = colors[l];
+						}
+				}
+		}
+	}
+}
+
 #else
 
 #include <EGL/egl.h>

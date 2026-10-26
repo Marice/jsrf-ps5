@@ -1154,10 +1154,10 @@ index 20c9273..1f32680 100644
              g_is_gl = 0;
 diff --git a/src/nv2a_vk/nv2a_vk.c b/src/nv2a_vk/nv2a_vk.c
 new file mode 100644
-index 0000000..75d8f01
+index 0000000..2b4442f
 --- /dev/null
 +++ b/src/nv2a_vk/nv2a_vk.c
-@@ -0,0 +1,2478 @@
+@@ -0,0 +1,2565 @@
 +/*
 + * The NV2A renderer's device on Vulkan (nv2a_backend.h): the third backend,
 + * beside OpenGL (nv2a_gl/nv2a_gfx_gl.c) and Metal (nv2a_metal/nv2a_metal.m).
@@ -1272,6 +1272,7 @@ index 0000000..75d8f01
 +	VkImageView depth_view;
 +	VkDeviceMemory depth_mem;
 +	uint32_t pw, ph;
++	uint8_t dirty;                     /* drawn into or cleared since it was last resolved (RESOLVE) */
 +	uint8_t used;
 +} VkRT;
 +
@@ -1314,6 +1315,21 @@ index 0000000..75d8f01
 +	Dead *dead;
 +	int ndead, capdead;
 +} Frame;
++
++/*
++ * jsrf-ps5 test modes (decision log D41), switched while the game runs (ps5/jsrf_ps5_vk.c reads the pad):
++ *   RESOLVE  a target is moved out of GENERAL and back before it is sampled, so that RADV resolves its fast-clear
++ *            and compression metadata (the graffiti and boost-haze artefact, D40);
++ *   ALPHA1   new targets start with alpha 1 rather than 0;
++ *   NOCULL   no face culling;
++ *   TRACE    the surface trace below.
++ */
++enum { JSRF_VK_RESOLVE = 1, JSRF_VK_ALPHA1 = 2, JSRF_VK_NOCULL = 4, JSRF_VK_TRACE = 8 };
++uint32_t jsrf_vk_modes;
++void jsrf_ps5_frame_hook(void) __attribute__((weak)); /* once a frame, from present */
++static uint32_t g_ovl;                                /* the indicator's texture, 0 for none */
++static uint32_t g_ovl_w, g_ovl_h;
++static uint64_t n_resolves;
 +
 +/* The surface trace (V3, JSRF_VK_SURFTRACE): see trace_* below. */
 +static void trace_bind(uint32_t from, uint32_t to);
@@ -1839,8 +1855,9 @@ index 0000000..75d8f01
 +	             VK_IMAGE_LAYOUT_GENERAL);
 +	image_layout(c, rt->depth, VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT, 1, VK_IMAGE_LAYOUT_UNDEFINED,
 +	             VK_IMAGE_LAYOUT_GENERAL);
-+	VkClearColorValue cc = {{0, 0, 0, 0}};
++	VkClearColorValue cc = {{0, 0, 0, (jsrf_vk_modes & JSRF_VK_ALPHA1) ? 1.0f : 0.0f}};
 +	VkClearDepthStencilValue dc = {g_zrev ? 0.0f : 1.0f, 0}; /* the far plane */
++	rt->dirty = 1;
 +	VkImageSubresourceRange cr = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
 +	VkImageSubresourceRange dr = {VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT, 0, 1, 0, 1};
 +	vkCmdClearColorImage(c, g_tex[rt->color - 1].image, VK_IMAGE_LAYOUT_GENERAL, &cc, 1, &cr);
@@ -1887,6 +1904,7 @@ index 0000000..75d8f01
 +	if (!rt_ok(g_cur_rt))
 +		return 0;
 +	VkRT *rt = &g_rt[g_cur_rt - 1];
++	rt->dirty = 1;
 +	VkCommandBuffer c = cmd();
 +	barrier_all(c);
 +	VkRenderingAttachmentInfo ca = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
@@ -2689,7 +2707,7 @@ index 0000000..75d8f01
 + * The first sampled pictures of each go to /app0/vkdump as BMP files. Repeats of an episode are counted, not logged.
 + */
 +#define TR_PROBES 48
-+#define TR_DUMPS 16
++#define TR_DUMPS 8
 +static int g_tr = -1;
 +static unsigned tr_lines;
 +static struct {
@@ -2719,12 +2737,25 @@ index 0000000..75d8f01
 +	uint32_t rt, w, h, n;
 +} g_trd;
 +
++static int tr_env = -1;
++
++/* Tracing now: the TRACE mode or JSRF_VK_SURFTRACE, and the probe buffers made. */
++static int tr_live(void)
++{
++	return g_tr > 0 && ((jsrf_vk_modes & JSRF_VK_TRACE) || tr_env > 0);
++}
++
 +static int tr_on(void)
 +{
-+	if (g_tr < 0) {
++	if (tr_env < 0) {
 +		const char *v = getenv("JSRF_VK_SURFTRACE");
-+		g_tr = v && *v && *v != '0';
-+		if (g_tr) {
++		tr_env = v && *v && *v != '0';
++	}
++	if (!(jsrf_vk_modes & JSRF_VK_TRACE) && tr_env <= 0)
++		return 0;
++	if (g_tr < 0) {
++		g_tr = 1;
++		{
 +			for (int i = 0; i < FRAMES; i++)
 +				if (!host_buffer(4u << 20, VK_BUFFER_USAGE_TRANSFER_DST_BIT, &g_trp[i].buf, &g_trp[i].mem,
 +				                 &g_trp[i].map))
@@ -2814,7 +2845,7 @@ index 0000000..75d8f01
 +static void tr_write_bmp(void)
 +{
 +	char name[96];
-+	uint32_t step = (g_trd.w + 767) / 768, w = g_trd.w / step, h = g_trd.h / step;
++	uint32_t step = (g_trd.w + 511) / 512, w = g_trd.w / step, h = g_trd.h / step;
 +	snprintf(name, sizeof name, "/app0/vkdump/%02u_rt%u_%ux%u.bmp", g_trd.n, g_trd.rt, g_trd.w, g_trd.h);
 +	FILE *fp = fopen(name, "wb");
 +	g_trd.n++;
@@ -2920,7 +2951,7 @@ index 0000000..75d8f01
 +
 +static void trace_clear(unsigned mask, const float rgba[4], const uint32_t rect[4])
 +{
-+	if (g_tr <= 0 || !tr_traced(g_cur_rt) || !g_trs[g_cur_rt - 1].open)
++	if (!tr_live() || !tr_traced(g_cur_rt) || !g_trs[g_cur_rt - 1].open)
 +		return;
 +	typeof(g_trs[0]) *t = &g_trs[g_cur_rt - 1];
 +	size_t at = strlen(t->clear_txt);
@@ -2940,7 +2971,7 @@ index 0000000..75d8f01
 +static void trace_draw(int prim, uint32_t count)
 +{
 +	(void)count;
-+	if (g_tr <= 0)
++	if (!tr_live())
 +		return;
 +	/* this draw's state, in one word: blend, its factors, the colour mask, depth, stencil, the topology */
 +	if (tr_traced(g_cur_rt) && g_trs[g_cur_rt - 1].open) {
@@ -3010,6 +3041,29 @@ index 0000000..75d8f01
 +	Frame *f = &g_fr[g_slot];
 +	uint32_t tex[4];
 +	const uint32_t sampled = prog_ok(g_cur_prog) ? g_prog[g_cur_prog - 1].samplers : 0;
++	/* RESOLVE: a target about to be sampled, moved out of GENERAL and back, so RADV resolves what a fast clear or
++	 * compression left in its metadata; the round trip leaves it in GENERAL, where everything else expects it. */
++	if (jsrf_vk_modes & JSRF_VK_RESOLVE) {
++		for (int u = 0; u < 4; u++) {
++			if (!((sampled >> u) & 1) || !tex_ok(g_bound[u]) || !g_tex[g_bound[u] - 1].is_target)
++				continue;
++			for (uint32_t r = 0; r < MAX_RT; r++) {
++				VkRT *t = &g_rt[r];
++				if (!t->used || t->color != g_bound[u] || !t->dirty || r + 1 == g_cur_rt)
++					continue;
++				pass_end();
++				VkCommandBuffer c = cmd();
++				image_layout(c, g_tex[t->color - 1].image, VK_IMAGE_ASPECT_COLOR_BIT, 1, VK_IMAGE_LAYOUT_GENERAL,
++				             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
++				image_layout(c, g_tex[t->color - 1].image, VK_IMAGE_ASPECT_COLOR_BIT, 1,
++				             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
++				t->dirty = 0;
++				n_resolves++;
++				g_set = VK_NULL_HANDLE;
++				break;
++			}
++		}
++	}
 +	for (int u = 0; u < 4; u++) {
 +		tex[u] = tex_ok(g_bound[u]) ? g_bound[u] : g_black;
 +		if ((sampled >> u) & 1) {
@@ -3109,6 +3163,7 @@ index 0000000..75d8f01
 +	}
 +	if (!count || !rt_ok(g_cur_rt) || !prog_ok(g_cur_prog) || !g_have_verts)
 +		return;
++	nocull = (nocull & 1) | ((jsrf_vk_modes & JSRF_VK_NOCULL) ? 2 : 0);
 +	if (prim >= NV2A_PRIM_TRIANGLES && g_rs.cull_enable && g_rs.cull_face == 0x408 && !nocull)
 +		return; /* front and back culled */
 +	if (prim == NV2A_PRIM_TRIANGLE_FAN && count < 3)
@@ -3245,8 +3300,25 @@ index 0000000..75d8f01
 +	trace_clear(mask, rgba, rect);
 +}
 +
++/* jsrf-ps5: the test modes' indicator (D41), a small picture made on the CPU, drawn over the top-left corner of every
++ * frame at twice its size; NULL takes it away. */
++void nv2a_vk_overlay(const void *rgba, uint32_t w, uint32_t h)
++{
++	if (g_ovl)
++		vk_tex_free(g_ovl);
++	g_ovl = 0;
++	if (!rgba || !w || !h)
++		return;
++	Nv2aSampler s = {0};
++	g_ovl = vk_tex_new(w, h, rgba, &s);
++	g_ovl_w = w;
++	g_ovl_h = h;
++}
++
 +static void vk_present(uint32_t h, uint32_t pw, uint32_t ph)
 +{
++	if (jsrf_ps5_frame_hook)
++		jsrf_ps5_frame_hook();
 +	Frame *f = &g_fr[g_slot];
 +	uint32_t img = 0;
 +	pass_end();
@@ -3286,6 +3358,20 @@ index 0000000..75d8f01
 +		                 .dstOffsets = {{dx, dy, 0}, {dx + dw, dy + dh, 1}}};
 +		vkCmdBlitImage(c, g_tex[rt->color - 1].image, VK_IMAGE_LAYOUT_GENERAL, g_swap_img[img],
 +		               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &b, VK_FILTER_LINEAR);
++	}
++	if (tex_ok(g_ovl)) {
++		VkImage oi = g_tex[g_ovl - 1].image;
++		barrier_all(c);
++		image_layout(c, oi, VK_IMAGE_ASPECT_COLOR_BIT, 1, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
++		             VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
++		VkImageBlit ob = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
++		                  .srcOffsets = {{0, 0, 0}, {(int32_t)g_ovl_w, (int32_t)g_ovl_h, 1}},
++		                  .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
++		                  .dstOffsets = {{48, 48, 0}, {48 + 2 * (int32_t)g_ovl_w, 48 + 2 * (int32_t)g_ovl_h, 1}}};
++		vkCmdBlitImage(c, oi, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, g_swap_img[img], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
++		               1, &ob, VK_FILTER_NEAREST);
++		image_layout(c, oi, VK_IMAGE_ASPECT_COLOR_BIT, 1, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
++		             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 +	}
 +	image_layout(c, g_swap_img[img], VK_IMAGE_ASPECT_COLOR_BIT, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
 +	             VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
@@ -3335,6 +3421,7 @@ index 0000000..75d8f01
 +		last_v = tsc_backend_v;
 +		last_wait = tsc_wait;
 +	}
++	LOG("modes %x: %llu targets resolved before sampling\n", jsrf_vk_modes, (unsigned long long)n_resolves);
 +	if (n_tex_gone || n_tex_none)
 +		LOG("black in place of a texture: %llu draws whose texture was gone, %llu with none bound\n",
 +		    (unsigned long long)n_tex_gone, (unsigned long long)n_tex_none);
