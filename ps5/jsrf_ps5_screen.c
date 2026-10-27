@@ -56,8 +56,18 @@ static void canvas_end(void)
 		hash = (hash ^ g_canvas[i]) * 16777619u;
 	if (hash == g_shown_hash)
 		return;
-	if (nv2a_vk_show(g_canvas, CANVAS_W, CANVAS_H))
+	if (nv2a_vk_show(g_canvas, CANVAS_W, CANVAS_H)) {
 		g_shown_hash = hash;
+		/* The console's launch picture (sce_sys/pic1.dds) stays over everything until the title hides it; SDL's PS5
+		   video driver would, but the engine runs SDL offscreen (decision log D66). After the first picture. */
+		static int splash_hidden;
+		if (!splash_hidden) {
+			int sceSystemServiceHideSplashScreen(void);
+			int r = sceSystemServiceHideSplashScreen();
+			fprintf(stderr, "jsrf: launch picture hidden (%#x)\n", (unsigned)r);
+			splash_hidden = 1;
+		}
+	}
 }
 
 /* The Vulkan build's test-mode indicator (D41): lines of text into a w x h picture, two pixels a font pixel, each
