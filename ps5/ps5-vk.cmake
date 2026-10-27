@@ -1,7 +1,7 @@
-# JSRF for PS5 on Vulkan (decision log D33, D34): what ps5-gl.cmake is to the OpenGL build, for Mihawk's RADV port.
-# build-vk.sh passes it as CMAKE_PROJECT_INCLUDE_BEFORE with the SDK fork's toolchain (RADV_ROOT). The compile is the
-# OpenGL build's; the link is ps5/link-vk.sh, which links RADV the way rush2-ps5 does (tools/radv-link.sh) and takes
-# from the platform layer what ps5-gl.cmake took from our own: the heap in direct memory, thread stacks, fflush.
+# JSRF for PS5 on Vulkan (decision log D33, D34), for Mihawk's RADV port. build-vk.sh passes it as
+# CMAKE_PROJECT_INCLUDE_BEFORE with the SDK fork's toolchain (RADV_ROOT). The link is ps5/link-vk.sh, which links RADV
+# the way rush2-ps5 does (tools/radv-link.sh) and takes the heap in direct memory, thread stacks and fflush from the
+# platform layer.
 if(NOT PS5_PACBREW)
     if(DEFINED ENV{PACBREW})
         set(PS5_PACBREW "$ENV{PACBREW}")

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Links the Vulkan build of JSRF (decision log D34) with Mihawk's RADV link recipe, as rush2-ps5's ps5/link-title.sh
-# and spike/vulkan/build.sh do: the RADV archive whole, the SDK fork's platform layer, libc++ and CRT, the AGC link
+# does: the RADV archive whole, the SDK fork's platform layer, libc++ and CRT, the AGC link
 # stubs. CMake calls it as the executable link rule (ps5/ps5-vk.cmake):
 #   link-vk.sh <output> <link flags, objects and libraries as CMake passes them>
 # It writes <output>, the unsigned ELF; build-vk.sh converts and signs it.
@@ -34,9 +34,9 @@ for arg in "$@"; do
         *) inputs+=("$arg") ;;
     esac
 done
-# As the OpenGL build: curl's group (ps5-gl.cmake), which OpenSSL comes with.
+# curl's group, which OpenSSL comes with.
 for lib in libcurl libpsl libzstd libssl libcrypto; do inputs+=("$PACBREW/lib/$lib.a"); done
-# glslang, built for the PS5 in build-vk/glslang (the phase 0 spike's, D32): the Vulkan device compiles its shaders.
+# glslang, built for the PS5 in build-vk/glslang (D32, see README): the Vulkan device compiles its shaders.
 glslang="$here/../build-vk/glslang/glslang"
 inputs+=("$glslang/libglslang.a" "$glslang/libglslang-default-resource-limits.a")
 

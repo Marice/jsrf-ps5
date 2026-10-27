@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Puts the PacBrew ports (SDL2 and the rest the build links) at a pinned release into .deps/pacbrew and prints the
-# sysroot build.sh uses (PACBREW). From rush2-ps5. A checked copy of the archive that is already on this machine
+# sysroot build-vk.sh uses (PACBREW). From rush2-ps5. A checked copy of the archive that is already on this machine
 # (rush2-ps5's or olise-player's) is used instead of downloading 346 MB. Does nothing if the release is extracted.
 set -euo pipefail
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)

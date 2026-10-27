@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Builds the Vulkan build of JSRF Unleashed for the PS5 into pkg-vk/<title>/ (decision log D33, D34): the OpenGL
-# build's sources on Mihawk's RADV port as rush2-ps5 has it (RADV_ROOT): the SDK fork's toolchain and platform layer,
+# Builds the Vulkan build of JSRF Unleashed for the PS5 into pkg-vk/<title>/ (decision log D33, D34): the game's
+# sources on Mihawk's RADV port as rush2-ps5 has it (RADV_ROOT): the SDK fork's toolchain and platform layer,
 # its link recipe (ps5/link-vk.sh), its converter (run in rush2-ps5's build image, whose libstdc++ it needs).
 #
-#   tools/setup-source.sh   once, as for build.sh
+#   tools/setup-source.sh   once: upstream at the pinned commit, with patches/jsrf.patch
 #   ./build-vk.sh
 #
-# The title is the OpenGL build's (PPSA69429): its eboot.bin replaces that one, next to the unpacked game.
+# The title is PPSA69429: its eboot.bin goes next to the unpacked game.
 set -euo pipefail
 
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)

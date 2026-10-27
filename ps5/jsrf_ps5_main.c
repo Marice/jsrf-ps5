@@ -30,7 +30,7 @@
 #define SETTINGS_FILE TITLE_DIR "/settings"
 #define ISO_NAME "JSRF - Jet Set Radio Future (USA).iso"
 
-int jsrf_ps5_status_begin(void); /* jsrf_ps5_gl.c */
+int jsrf_ps5_status_begin(void); /* jsrf_ps5_vk.c */
 void jsrf_ps5_status_end(void);
 int jsrf_ps5_gl_prepare(void);
 int __real_fflush(FILE *stream);
