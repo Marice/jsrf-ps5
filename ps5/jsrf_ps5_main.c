@@ -96,9 +96,17 @@ static int exists(const char *path)
 }
 
 /* The first .iso in dump/; the usual name when the folder cannot be listed. */
+#if defined(JSRF_PS5_RADV)
+/* RADV's link recipe binds opendir and its kin to the platform's own, which can list a folder; the --wrap names then
+   leave __real_opendir at address 0 (the first import with no game/ jumped there). */
+#define __real_opendir opendir
+#define __real_readdir readdir
+#define __real_closedir closedir
+#else
 DIR *__real_opendir(const char *path);
 struct dirent *__real_readdir(DIR *dir);
 int __real_closedir(DIR *dir);
+#endif
 
 static int find_iso(char *out, size_t cap)
 {
