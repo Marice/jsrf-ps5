@@ -1796,10 +1796,10 @@ index 1137e89..9dd720f 100644
              g_is_gl = 0;
 diff --git a/src/nv2a_vk/nv2a_vk.c b/src/nv2a_vk/nv2a_vk.c
 new file mode 100644
-index 0000000..cb86592
+index 0000000..9fbc2c7
 --- /dev/null
 +++ b/src/nv2a_vk/nv2a_vk.c
-@@ -0,0 +1,3573 @@
+@@ -0,0 +1,3803 @@
 +/*
 + * The NV2A renderer's device on Vulkan (nv2a_backend.h): the third backend,
 + * beside OpenGL (nv2a_gl/nv2a_gfx_gl.c) and Metal (nv2a_metal/nv2a_metal.m).
@@ -1848,6 +1848,12 @@ index 0000000..cb86592
 +#include <glslang/Public/resource_limits_c.h>
 +
 +#include "nv2a_backend.h"
++#if !defined(NV2A_VK_HOST)
++#include "nv2a_shader_cache.h"
++#endif
++#if __has_include(<glslang/build_info.h>)
++#include <glslang/build_info.h>
++#endif
 +
 +/* Where the capture and the replay keep their files: the title folder, or elsewhere when this file is built for a
 + * computer to replay a capture there (NV2A_VK_HOST, decision log D43). */
@@ -1874,7 +1880,8 @@ index 0000000..cb86592
 +	X(MapMemory) X(CreateImage) X(DestroyImage) X(GetImageMemoryRequirements) X(BindImageMemory)                \
 +	X(CreateImageView) X(DestroyImageView) X(CreateSampler) X(CreateShaderModule) X(DestroyShaderModule)        \
 +	X(CreateDescriptorSetLayout) X(CreatePipelineLayout) X(CreateGraphicsPipelines) X(DestroyPipeline)          \
-+	X(CreatePipelineCache) X(CreateDescriptorPool) X(ResetDescriptorPool) X(AllocateDescriptorSets)            \
++	X(CreatePipelineCache) X(MergePipelineCaches) X(GetPipelineCacheData) X(DestroyPipelineCache)               \
++	X(CreateDescriptorPool) X(ResetDescriptorPool) X(AllocateDescriptorSets)                                    \
 +	X(UpdateDescriptorSets) X(CreateSemaphore) X(CreateSwapchainKHR) X(GetSwapchainImagesKHR)                   \
 +	X(AcquireNextImageKHR) X(QueuePresentKHR) X(CmdPipelineBarrier2) X(CmdBeginRendering) X(CmdEndRendering)   \
 +	X(CmdSetViewport) X(CmdSetScissor) X(CmdBindPipeline) X(CmdBindDescriptorSets) X(CmdBindVertexBuffers)     \
@@ -2047,6 +2054,7 @@ index 0000000..cb86592
 +
 +/* counters for report() */
 +static uint64_t n_draws, n_pipes, n_passes, n_flushes, n_snaps, n_reads, n_tex, tex_bytes, n_progs, n_frames;
++static uint64_t n_progs_cached; /* of n_progs, made from the cache's SPIR-V (D58) */
 +static double ms_pipes, ms_progs;
 +
 +static double now_ms(void)
@@ -2931,7 +2939,8 @@ index 0000000..cb86592
 +	return out.p;
 +}
 +
-+static VkShaderModule compile_stage(const char *src, glslang_stage_t stage, const char *what)
++/* A stage's GLSL as SPIR-V: the words (malloc'd, `*words` of them), or NULL. */
++static uint32_t *compile_spirv(const char *src, glslang_stage_t stage, const char *what, size_t *words)
 +{
 +	const glslang_input_t input = {
 +		.language = GLSLANG_SOURCE_GLSL, .stage = stage, .client = GLSLANG_CLIENT_VULKAN,
@@ -2943,7 +2952,8 @@ index 0000000..cb86592
 +	};
 +	glslang_shader_t *sh = glslang_shader_create(&input);
 +	glslang_shader_set_options(sh, GLSLANG_SHADER_AUTO_MAP_BINDINGS | GLSLANG_SHADER_AUTO_MAP_LOCATIONS);
-+	VkShaderModule m = VK_NULL_HANDLE;
++	uint32_t *code = NULL;
++	*words = 0;
 +	if (!glslang_shader_preprocess(sh, &input) || !glslang_shader_parse(sh, &input)) {
 +		LOG("%s %s shader: %s\n", what, stage == GLSLANG_STAGE_VERTEX ? "vertex" : "fragment",
 +		    glslang_shader_get_info_log(sh));
@@ -2951,7 +2961,7 @@ index 0000000..cb86592
 +		if (shown++ < 3)
 +			fprintf(stderr, "----\n%s\n----\n", src);
 +		glslang_shader_delete(sh);
-+		return VK_NULL_HANDLE;
++		return NULL;
 +	}
 +	glslang_program_t *pr = glslang_program_create();
 +	glslang_program_add_shader(pr, sh);
@@ -2960,19 +2970,212 @@ index 0000000..cb86592
 +		LOG("%s: link: %s\n", what, glslang_program_get_info_log(pr));
 +	} else {
 +		glslang_program_SPIRV_generate(pr, stage);
-+		size_t words = glslang_program_SPIRV_get_size(pr);
-+		uint32_t *code = malloc(words * 4);
-+		glslang_program_SPIRV_get(pr, code);
-+		VkShaderModuleCreateInfo mi = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = words * 4,
-+		                               .pCode = code};
-+		if (vkCreateShaderModule(g_dev, &mi, NULL, &m) != VK_SUCCESS)
-+			LOG("%s: no shader module\n", what);
-+		free(code);
++		*words = glslang_program_SPIRV_get_size(pr);
++		if ((code = malloc(*words * 4)) != NULL)
++			glslang_program_SPIRV_get(pr, code);
++		else
++			*words = 0;
 +	}
 +	glslang_program_delete(pr);
 +	glslang_shader_delete(sh);
++	return code;
++}
++
++static VkShaderModule make_module(const uint32_t *code, size_t words, const char *what)
++{
++	VkShaderModule m = VK_NULL_HANDLE;
++	VkShaderModuleCreateInfo mi = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = words * 4,
++	                               .pCode = code};
++	if (!code || !words || vkCreateShaderModule(g_dev, &mi, NULL, &m) != VK_SUCCESS) {
++		LOG("%s: no shader module\n", what);
++		return VK_NULL_HANDLE;
++	}
 +	return m;
 +}
++
++/* One stage, compiled now (the frame replay's). */
++static VkShaderModule compile_stage(const char *src, glslang_stage_t stage, const char *what)
++{
++	size_t words = 0;
++	uint32_t *code = compile_spirv(src, stage, what, &words);
++	VkShaderModule m = code ? make_module(code, words, what) : VK_NULL_HANDLE;
++	free(code);
++	return m;
++}
++
++/* ---- the shader cache (nv2a_shader_cache.h, decision log D58) --------------------------------------------------
++ *
++ * The front half keeps every program as the pair of GLSL sources it was made from, and before the game starts adds
++ * the ones the engine's seed lists (seed_import). What costs here is glslang (~8 ms a program on the console, D58),
++ * so the SPIR-V of both stages is kept as the program's "binary": a program the cache has costs two shader modules
++ * the next time it is asked for. The SPIR-V depends on glslang and on vulkanize, not on the GPU's driver, so those
++ * two name it (VK_SPIRV_FORMAT: raise it when vulkanize changes what it writes). A record is [vertex words][fragment
++ * words][the vertex SPIR-V][the fragment SPIR-V]. Programs with no SPIR-V yet are compiled once, all of them, when
++ * the cache opens, before the game starts (Marice's choice, D58). RADV's pipeline cache goes to a file of its own,
++ * read at that moment and written on a frame with little to draw when pipelines were added, at most once a minute:
++ * the title folder is on the console's SSD. */
++#define VK_SPIRV_FORMAT 1u
++#define PIPE_SAVE_EVERY_MS 60000.0
++static int g_spv_ok;                    /* SPIR-V kept in the cache */
++static char g_pipe_file[1100];
++static uint64_t g_pipes_saved = ~0ull;  /* n_pipes when the file was last written (~0: never read) */
++static double g_pipes_saved_ms;
++
++static void vulkanize_pair(const char *vsrc, const char *fsrc, VkProg *p, char **vs, char **fs)
++{
++	memset(p, 0, sizeof *p);
++	for (int s = 0; s < 2; s++)
++		for (int u = 0; u < NV2A_U_COUNT; u++)
++			p->off[s][u] = -1;
++	*vs = vulkanize(vsrc, 0, p, &p->vu_size);
++	*fs = vulkanize(fsrc, 1, p, &p->fu_size);
++}
++
++/* Both stages' SPIR-V as one record (malloc'd, `*len` bytes), or NULL if either does not compile. */
++static void *spirv_pair(const char *vs, const char *fs, const char *what, uint32_t *len)
++{
++	size_t vw = 0, fw = 0;
++	uint32_t *v = compile_spirv(vs, GLSLANG_STAGE_VERTEX, what, &vw);
++	uint32_t *f = v ? compile_spirv(fs, GLSLANG_STAGE_FRAGMENT, what, &fw) : NULL;
++	uint32_t *rec = (v && f) ? malloc((2 + vw + fw) * 4) : NULL;
++	if (rec) {
++		rec[0] = (uint32_t)vw;
++		rec[1] = (uint32_t)fw;
++		memcpy(rec + 2, v, vw * 4);
++		memcpy(rec + 2 + vw, f, fw * 4);
++		*len = (uint32_t)((2 + vw + fw) * 4);
++	}
++	free(v);
++	free(f);
++	return rec;
++}
++
++/* A record's two modules; 0 if it is damaged or a module will not make. */
++static int modules_from(const void *data, uint32_t len, VkProg *p, const char *what)
++{
++	const uint32_t *rec = data;
++	if (!rec || len < 8 || (uint64_t)(2 + (uint64_t)rec[0] + rec[1]) * 4 != len || !rec[0] || !rec[1])
++		return 0;
++	p->vs = make_module(rec + 2, rec[0], what);
++	p->fs = p->vs ? make_module(rec + 2 + rec[0], rec[1], what) : VK_NULL_HANDLE;
++	if (!p->fs && p->vs) {
++		vkDestroyShaderModule(g_dev, p->vs, NULL);
++		p->vs = VK_NULL_HANDLE;
++	}
++	return p->vs != VK_NULL_HANDLE;
++}
++
++#if !defined(NV2A_VK_HOST)
++static void pipes_load(const char *dir)
++{
++	snprintf(g_pipe_file, sizeof g_pipe_file, "%s/pipelines-vulkan.dat", dir);
++	g_pipes_saved = n_pipes;
++	g_pipes_saved_ms = now_ms();
++	FILE *f = fopen(g_pipe_file, "rb");
++	if (!f) {
++		fprintf(stderr, "  [SHADERS] Vulkan: no saved pipelines yet (%s)\n", g_pipe_file);
++		return;
++	}
++	long end = (!fseek(f, 0, SEEK_END)) ? ftell(f) : -1;
++	rewind(f);
++	void *data = (end > 0 && end < (256L << 20)) ? malloc((size_t)end) : NULL;
++	if (data && fread(data, 1, (size_t)end, f) == (size_t)end) {
++		VkPipelineCacheCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO,
++		                                .initialDataSize = (size_t)end, .pInitialData = data};
++		VkPipelineCache loaded = VK_NULL_HANDLE;
++		VkResult r = vkCreatePipelineCache(g_dev, &ci, NULL, &loaded);
++		if (r == VK_SUCCESS)
++			r = vkMergePipelineCaches(g_dev, g_pipe_cache, 1, &loaded);
++		if (loaded)
++			vkDestroyPipelineCache(g_dev, loaded, NULL);
++		fprintf(stderr, "  [SHADERS] Vulkan: saved pipelines read, %ld KB (%s)\n", end >> 10,
++		        r == VK_SUCCESS ? "merged" : "refused");
++	}
++	free(data);
++	fclose(f);
++}
++
++static void pipes_save(void)
++{
++	size_t size = 0;
++	if (!g_pipe_file[0] || vkGetPipelineCacheData(g_dev, g_pipe_cache, &size, NULL) != VK_SUCCESS || !size)
++		return;
++	void *data = malloc(size);
++	char tmp[1110];
++	snprintf(tmp, sizeof tmp, "%s.new", g_pipe_file);
++	FILE *f = NULL;
++	int ok = data && vkGetPipelineCacheData(g_dev, g_pipe_cache, &size, data) == VK_SUCCESS &&
++	         (f = fopen(tmp, "wb")) != NULL && fwrite(data, 1, size, f) == size;
++	if (f && fclose(f))
++		ok = 0;
++	if (ok)
++		ok = rename(tmp, g_pipe_file) == 0;
++	else if (f)
++		remove(tmp);
++	free(data);
++	g_pipes_saved = n_pipes;
++	g_pipes_saved_ms = now_ms();
++	fprintf(stderr, "  [SHADERS] Vulkan: %llu pipelines written, %zu KB%s\n", (unsigned long long)n_pipes, size >> 10,
++	        ok ? "" : " -- failed");
++}
++
++static void vk_cache_open(const char *dir, const char *tag)
++{
++	char drv[128];
++	if (!nv2a_sc_open(dir, tag))
++		return;
++#if defined(GLSLANG_VERSION_MAJOR)
++	snprintf(drv, sizeof drv, "SPIR-V|glslang %d.%d.%d|vulkanize %u", GLSLANG_VERSION_MAJOR, GLSLANG_VERSION_MINOR,
++	         GLSLANG_VERSION_PATCH, VK_SPIRV_FORMAT);
++#else
++	snprintf(drv, sizeof drv, "SPIR-V|glslang|vulkanize %u", VK_SPIRV_FORMAT);
++#endif
++	g_spv_ok = nv2a_sc_bin_open(drv);
++	pipes_load(dir);
++	if (!g_spv_ok)
++		return;
++	/* every program without SPIR-V: compiled now, before the game starts (D58) */
++	const double t0 = now_ms();
++	int n = nv2a_sc_count(), built = 0, failed = 0, have = 0;
++	for (int i = 0; i < n; i++) {
++		uint64_t key;
++		const char *v, *f;
++		if (!nv2a_sc_entry(i, &key, &v, &f))
++			continue;
++		if (nv2a_sc_bin_has(key)) {
++			have++;
++			continue;
++		}
++		VkProg scratch;
++		char *vs, *fs;
++		uint32_t len = 0;
++		vulkanize_pair(v, f, &scratch, &vs, &fs);
++		void *rec = (vs && fs) ? spirv_pair(vs, fs, "a cached program", &len) : NULL;
++		if (rec) {
++			nv2a_sc_bin_put(key, rec, len, VK_SPIRV_FORMAT);
++			built++;
++		} else {
++			failed++;
++		}
++		free(rec);
++		free(vs);
++		free(fs);
++	}
++	fprintf(stderr, "  [SHADERS] Vulkan: %d programs in the cache, %d with SPIR-V already, %d compiled now in %.0f ms"
++	        "%s\n", n, have, built, now_ms() - t0, failed ? " (some would not compile)" : "");
++	fflush(stderr);
++}
++
++/* Called on frames with little to draw: the pipelines to their file, when some were added and a minute has gone.
++ * Always "more to do", so that it keeps being called. */
++static int vk_cache_idle(double budget_ms)
++{
++	(void)budget_ms;
++	if (g_pipe_file[0] && n_pipes != g_pipes_saved && now_ms() - g_pipes_saved_ms >= PIPE_SAVE_EVERY_MS)
++		pipes_save();
++	return 1;
++}
++#endif
 +
 +/* Programs that did not compile, by a hash of both sources: the front half asks again on every draw that needs one,
 + * and compiling a failing pair thousands of times a second starved the game, its sound included (D36). */
@@ -3005,20 +3208,41 @@ index 0000000..cb86592
 +	}
 +	double t0 = now_ms();
 +	VkProg *p = &g_prog[i];
-+	memset(p, 0, sizeof *p);
-+	for (int s = 0; s < 2; s++)
-+		for (int u = 0; u < NV2A_U_COUNT; u++)
-+			p->off[s][u] = -1;
-+	char *vs = vulkanize(vsrc, 0, p, &p->vu_size);
-+	char *fs = vulkanize(fsrc, 1, p, &p->fu_size);
++	char *vs, *fs;
++	vulkanize_pair(vsrc, fsrc, p, &vs, &fs);
 +	for (int a = 0; a < 16; a++) {
 +		char pat[48];
 +		snprintf(pat, sizeof pat, "in vec4 v%d;", a);
 +		if (strstr(vsrc, pat))
 +			p->inputs |= 1u << a;
 +	}
-+	p->vs = compile_stage(vs, GLSLANG_STAGE_VERTEX, what ? what : "program");
-+	p->fs = p->vs ? compile_stage(fs, GLSLANG_STAGE_FRAGMENT, what ? what : "program") : VK_NULL_HANDLE;
++	what = what ? what : "program";
++	int from_cache = 0;
++#if !defined(NV2A_VK_HOST)
++	/* the SPIR-V the cache keeps, by the key of the front half's sources (D58) */
++	const uint64_t key = (g_spv_ok && nv2a_sc_is_open()) ? nv2a_sc_key(vsrc, fsrc) : 0;
++	if (key && nv2a_sc_bin_has(key)) {
++		uint32_t len = 0, format = 0;
++		void *rec = nv2a_sc_bin_get(key, &len, &format);
++		from_cache = format == VK_SPIRV_FORMAT && modules_from(rec, len, p, what);
++		free(rec);
++		if (!from_cache)
++			nv2a_sc_bin_drop(key);
++	}
++#endif
++	if (!from_cache && vs && fs) {
++		uint32_t len = 0;
++		void *rec = spirv_pair(vs, fs, what, &len);
++		if (rec && modules_from(rec, len, p, what)) {
++#if !defined(NV2A_VK_HOST)
++			if (key) {
++				nv2a_sc_add(key, vsrc, fsrc);
++				nv2a_sc_bin_put(key, rec, len, VK_SPIRV_FORMAT);
++			}
++#endif
++		}
++		free(rec);
++	}
 +	p->src_v = vs; /* kept for the frame capture; freed with the program */
 +	p->src_f = fs;
 +	if (!p->vs || !p->fs) {
@@ -3034,6 +3258,7 @@ index 0000000..cb86592
 +	p->dirty_v = p->dirty_f = 1;
 +	p->used = 1;
 +	n_progs++;
++	n_progs_cached += from_cache;
 +	ms_progs += now_ms() - t0;
 +	return (uint32_t)i + 1;
 +}
@@ -4559,10 +4784,11 @@ index 0000000..cb86592
 +
 +static void vk_report(void)
 +{
-+	LOG("%llu frames, %llu draws, %llu passes; %llu programs (%.0f ms), %llu pipelines (%.0f ms); "
-+	    "%llu textures (%.1f MB); %llu snapshots, %llu reads, %llu waits\n",
++	LOG("%llu frames, %llu draws, %llu passes; %llu programs (%.0f ms; %llu from the cache's SPIR-V), %llu pipelines "
++	    "(%.0f ms); %llu textures (%.1f MB); %llu snapshots, %llu reads, %llu waits\n",
 +	    (unsigned long long)n_frames, (unsigned long long)n_draws, (unsigned long long)n_passes,
-+	    (unsigned long long)n_progs, ms_progs, (unsigned long long)n_pipes, ms_pipes, (unsigned long long)n_tex,
++	    (unsigned long long)n_progs, ms_progs, (unsigned long long)n_progs_cached, (unsigned long long)n_pipes,
++	    ms_pipes, (unsigned long long)n_tex,
 +	    tex_bytes / 1048576.0, (unsigned long long)n_snaps, (unsigned long long)n_reads,
 +	    (unsigned long long)n_flushes);
 +	{
@@ -5364,6 +5590,10 @@ index 0000000..cb86592
 +	.report = vk_report,
 +	.uniform_f_part = vk_uniform_f_part,
 +	.pipeline_ms = vk_pipeline_ms,
++#if !defined(NV2A_VK_HOST)
++	.cache_open = vk_cache_open,
++	.cache_idle = vk_cache_idle,
++#endif
 +	.zrev = vk_zrev,
 +	.vbuf_new = vk_vbuf_new,
 +	.vbuf_free = vk_vbuf_free,
