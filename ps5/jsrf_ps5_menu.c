@@ -144,9 +144,9 @@ static double now_s(void)
 
 static const int kOutputs[] = {1080, 1440, 2160};
 #if defined(JSRF_PS5_RADV)
-enum { ROW_OUTPUT = -1, ROW_SCALE, ROW_WIDE, ROW_DRIVER, ROW_START, ROWS };
+enum { ROW_OUTPUT = -1, ROW_SCALE, ROW_WIDE, ROW_CAMERA, ROW_DEBUG, ROW_START, ROWS };
 #else
-enum { ROW_OUTPUT, ROW_SCALE, ROW_WIDE, ROW_START, ROWS, ROW_DRIVER = -2 };
+enum { ROW_OUTPUT, ROW_SCALE, ROW_WIDE, ROW_START, ROWS, ROW_CAMERA = -2, ROW_DEBUG = -3 };
 #endif
 
 /* The most the scale row offers: 6x in the Vulkan build (3840x2880, in widescreen 3840x2160, the 4K screen pixel
@@ -157,11 +157,9 @@ enum { ROW_OUTPUT, ROW_SCALE, ROW_WIDE, ROW_START, ROWS, ROW_DRIVER = -2 };
 #define SCALE_MAX 4
 #endif
 
-static int g_output = 2160, g_scale = 4, g_wide = 1, g_driver, g_driver_start;
-/* The DRIVER row: RADV_DEBUG for the next start (the device is open by the time the menu shows). */
-static const struct { const char *name, *radv; } kDrivers[4] = {
-	{"NORMAL", ""}, {"NO FAST CLEARS", "nofastclears"}, {"NO DCC", "nodcc"}, {"NO FAST CLEARS, NO DCC", "nofastclears,nodcc"},
-};
+static int g_output = 2160, g_scale = 4, g_wide = 1, g_camera = 1;
+/* DEBUG MODE: the test modes on the touchpad (jsrf_ps5_vk.c) and their start values; off for playing. */
+int jsrf_ps5_debug;
 
 /* Before the status screen opens: the display in the kept mode, so the menu is already shown in it. */
 void jsrf_ps5_menu_prepare(const char *settings)
@@ -169,12 +167,8 @@ void jsrf_ps5_menu_prepare(const char *settings)
 	g_output = cfg_get(settings, "ps5_output", 2160);
 	if (g_output != 1080 && g_output != 1440)
 		g_output = 2160;
-	g_driver = g_driver_start = cfg_get(settings, "vk_driver", 0) & 3; /* kept as it is by the OpenGL build */
 #if defined(JSRF_PS5_RADV)
-	/* The test modes (D41): RADV's options, read when the device opens, so before the status screen; and the
-	 * backend's modes to start with, which the touchpad changes in the game. */
-	if (g_driver)
-		setenv("RADV_DEBUG", kDrivers[g_driver].radv, 1);
+	/* The test modes (D41): the backend's modes to start with, which the touchpad changes in the game. */
 	{
 		extern uint32_t jsrf_vk_modes;
 		jsrf_vk_modes = (uint32_t)cfg_get(settings, "vk_modes", 0);
@@ -187,16 +181,19 @@ void jsrf_ps5_menu_prepare(const char *settings)
 	if (g_scale < 1 || g_scale > SCALE_MAX)
 		g_scale = 4;
 	g_wide = cfg_get(settings, "widescreen", 1) != 0;
+	/* upstream's key for the camera on the right stick (0.5.8, recomp_manual.c), on unless turned off */
+	g_camera = cfg_get(settings, "rstick_camera", 1) != 0;
+	jsrf_ps5_debug = cfg_get(settings, "debug_mode", 0) != 0;
 	jsrf_ps5_display_mode(g_output);
-	fprintf(stderr, "jsrf: menu: kept choices: output %dp, scale %d, widescreen %s\n", g_output, g_scale,
-	        g_wide ? "on" : "off");
+	fprintf(stderr, "jsrf: menu: kept choices: output %dp, scale %d, widescreen %s, right-stick camera %s\n",
+	        g_output, g_scale, g_wide ? "on" : "off", g_camera ? "on" : "off");
 }
 
 /* The menu; returns when the game is to start, with the choices written to the settings file. */
 void jsrf_ps5_menu(const char *settings)
 {
 #if defined(JSRF_PS5_RADV)
-	static const char *const labels[ROWS] = {"SCALE", "WIDESCREEN", "DRIVER", "START GAME"};
+	static const char *const labels[ROWS] = {"SCALE", "WIDESCREEN", "CAMERA", "DEBUG MODE", "START GAME"};
 #else
 	static const char *const labels[ROWS] = {"RESOLUTION", "SCALE", "WIDESCREEN", "START GAME"};
 #endif
@@ -254,10 +251,12 @@ void jsrf_ps5_menu(const char *settings)
 				}
 			} else if (step && selected == ROW_SCALE) {
 				g_scale = (g_scale - 1 + SCALE_MAX + step) % SCALE_MAX + 1;
-			} else if (step && selected == ROW_DRIVER) {
-				g_driver = (g_driver + 4 + step) % 4;
 			} else if (step && selected == ROW_WIDE) {
 				g_wide = !g_wide;
+			} else if (step && selected == ROW_CAMERA) {
+				g_camera = !g_camera;
+			} else if (step && selected == ROW_DEBUG) {
+				jsrf_ps5_debug = !jsrf_ps5_debug;
 			}
 			snprintf(footer, sizeof footer, "UP/DOWN CHOOSE  -  LEFT/RIGHT CHANGE  -  X ON START GAME");
 		}
@@ -270,25 +269,29 @@ void jsrf_ps5_menu(const char *settings)
 		values[ROW_SCALE] = scale;
 		values[ROW_WIDE] = g_wide ? "ON" : "OFF";
 #if defined(JSRF_PS5_RADV)
-		char driver[48];
-		snprintf(driver, sizeof driver, "%s%s", kDrivers[g_driver].name,
-		         g_driver == g_driver_start ? "" : " (NEXT START)");
-		values[ROW_DRIVER] = driver;
+		values[ROW_CAMERA] = g_camera ? "RIGHT STICK" : "ORIGINAL";
+		values[ROW_DEBUG] = jsrf_ps5_debug ? "ON" : "OFF";
 #endif
 		values[ROW_START] = NULL;
 		jsrf_ps5_screen_menu("JET SET RADIO FUTURE", "PS5 SETTINGS", labels, values, ROWS, open ? selected : -1,
 		                     footer);
 		usleep(8000);
 	}
-	static const char *const keys[] = {"ps5_output", "scale", "widescreen", "vk_driver"};
-	const int kept[] = {g_output, g_scale, g_wide, g_driver};
-	cfg_put(settings, keys, kept, 4);
-	fprintf(stderr, "jsrf: menu: starting with output %dp, scale %d, widescreen %s\n", g_output, g_scale,
-	        g_wide ? "on" : "off");
+	static const char *const keys[] = {"ps5_output", "scale", "widescreen", "rstick_camera", "debug_mode"};
+	const int kept[] = {g_output, g_scale, g_wide, g_camera, jsrf_ps5_debug};
+	cfg_put(settings, keys, kept, 5);
+	fprintf(stderr, "jsrf: menu: starting with output %dp, scale %d, widescreen %s, right-stick camera %s, debug %s\n",
+	        g_output, g_scale, g_wide ? "on" : "off", g_camera ? "on" : "off", jsrf_ps5_debug ? "on" : "off");
 #if defined(JSRF_PS5_RADV)
 	snprintf(scale, sizeof scale, "%d", g_scale);
 	setenv("RECOMP_GL_SCALE", scale, 1);
 	setenv("RECOMP_WIDESCREEN", g_wide ? "1" : "0", 1);
+	/* the engine has no window layer to ask (nv_window_pref_rstick_camera is upstream's weak "off"): it reads this */
+	setenv("RECOMP_RSTICK_CAMERA", g_camera ? "1" : "0", 1);
+	if (!jsrf_ps5_debug) {
+		extern uint32_t jsrf_vk_modes;
+		jsrf_vk_modes = 0; /* the settings file's vk_modes only with DEBUG MODE on */
+	}
 #endif
 	if (g_pad_ours)
 		scePadClose(g_pad); /* the game's SDL opens it */

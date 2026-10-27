@@ -206,12 +206,13 @@ int nv_window_pref_msaa(void)
 }
 
 /* ---- the test modes, switched in the game (decision log D41) ----
- * Hold the touchpad: the list shows top left; up and down choose a mode, left, right or X switch it. The modes live in
+ * Only with DEBUG MODE on in the start menu (jsrf_ps5_debug). Hold the touchpad: the list shows top left; up and down choose a mode, left, right or X switch it. The modes live in
  * memory only (nothing is written to the SSD); their start values are the settings file's vk_modes. The pad is the one
  * SDL opened, read with scePadReadState, which takes no samples away from it. */
 #include <stdint.h>
 
 extern uint32_t jsrf_vk_modes;                                         /* src/nv2a_vk/nv2a_vk.c */
+extern int jsrf_ps5_debug;                                             /* jsrf_ps5_menu.c */
 void nv2a_vk_overlay(const void *rgba, uint32_t w, uint32_t h);       /* src/nv2a_vk/nv2a_vk.c */
 void jsrf_ps5_text_rgba(uint32_t *buf, int w, int h, const char *const *lines, const uint32_t *colors, int count);
 
@@ -238,6 +239,8 @@ void jsrf_ps5_frame_hook(void)
 	static unsigned frame, hide_at, tries;
 	static uint32_t before, shown_key = ~0u;
 	static uint32_t pic[OVL_W * OVL_H];
+	if (!jsrf_ps5_debug)
+		return;
 	frame++;
 	if (pad < 0) {
 		int32_t user = -1;
