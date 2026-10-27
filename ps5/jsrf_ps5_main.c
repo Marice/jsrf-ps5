@@ -185,8 +185,8 @@ static int on_progress(void *ctx, uint64_t done, uint64_t total)
 		char line[64];
 		snprintf(line, sizeof line, "%d%% (%llu OF %llu MB)", percent, (unsigned long long)(done >> 20),
 		         (unsigned long long)(total >> 20));
-		/* about 3,200 files, 2.5 GB: about five minutes on the console's own storage */
-		status3("UNPACKING YOUR DISC IMAGE, ONCE.", line, "GRAB SOME SNACKS, THIS TAKES ABOUT 5 MINUTES...", 0);
+		/* about 3,200 files, 2.5 GB: about ten minutes on the console's own storage */
+		status3("UNPACKING YOUR DISC IMAGE, ONCE.", line, "GRAB SOME SNACKS, THIS TAKES ABOUT 10 MINUTES...", 0);
 		if (percent % 10 == 0) {
 			fprintf(stderr, "jsrf: unpacking %s\n", line);
 			fflush(stderr); /* the log is buffered: the progress is in it as it happens */

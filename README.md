@@ -12,25 +12,44 @@ on your machine from your own `default.xbe`, and the title reads the rest from y
 
 ## Status
 
-Work in progress. Tested on one console (ShadowMountPlus):
+An early release. Tested on one console (etaHEN, ShadowMountPlus, the internal SSD):
 
-- The start menu, the disc import, the game's menus and play with sound and the DualSense
+- Installing from a disc image, the start menu, the game's menus and play with sound and the DualSense
 - Busy stretches at 58 to 60 fps at render scale 2, output at 3840x2160
-
-Not tested on a console yet: the latest changes in this repository. They are a faster lookup of each thread's
-register block, a fix for a hang at the first boss, and a shader cache on disk.
+- The camera on the right stick, saves, and keeping the game and saves across an update of the title
 
 ## Installing
 
-There is no release yet. With a build of your own (see below):
+1. Download `JSRFUnleashed-PS5-<version>.zip` from the [releases](https://github.com/Marice/jsrf-ps5/releases) and
+   unpack the `PPSA69431` folder to `/data/homebrew/` on the console (ShadowMountPlus installs it). ProsperoStore
+   installs it for you.
+2. Put your disc image of **Jet Set Radio Future (USA)**, a `.iso` file, in `/data/homebrew/PPSA69431/dump/`. Only
+   the standalone US release runs.
+3. Start **JSRF Unleashed**. The first start checks the image and unpacks it, which takes about ten minutes. It
+   happens once. After that you can remove the disc image.
 
-1. Copy the `pkg-vk/PPSA69431` folder to `/data/homebrew/` on the console (ShadowMountPlus installs it).
-2. Put your disc image of **Jet Set Radio Future (USA)**, a `.iso` file, in `/data/homebrew/PPSA69431/dump/`.
-3. Start the title. The first start checks the image and unpacks it into the title folder's `game/` folder. This
-   happens once and takes several minutes. After that you can remove the disc image.
+The title keeps the unpacked game, your saves and your settings in `/data/jsrf-ps5`, outside its own folder. An
+update of the title, by hand or through ProsperoStore, replaces only the title folder, so the game does not unpack
+again and your saves stay. A title that cannot write `/data` (on another drive) keeps them in its own folder.
 
-Before the game starts, a short menu shows the render scale and widescreen. It counts down five seconds and starts
-with the last choices. Press X to change them.
+| Path | What it holds |
+| --- | --- |
+| `/data/jsrf-ps5/game/` | The game's files, unpacked from your disc image |
+| `/data/jsrf-ps5/save/UDATA/` | Your saves. Copy this folder to back them up. |
+| `/data/jsrf-ps5/settings` | The start menu's choices |
+| `/data/homebrew/PPSA69431/jsrf.log` | The log of the last start |
+
+## The start menu
+
+Before the game starts, a short menu counts down five seconds and starts with the last choices. Press X to change
+them, up and down to choose a row, left and right to change it, and X on START GAME to start.
+
+| Row | What it does |
+| --- | --- |
+| SCALE | The render resolution, 1x to 6x the Xbox's 640x480 (6x fills a 4K screen) |
+| WIDESCREEN | A wider 16:9 view, not a stretch |
+| CAMERA | RIGHT STICK turns the camera around the skater; ORIGINAL keeps the game's own camera |
+| DEBUG MODE | Test modes on the touchpad, for development |
 
 ## Building
 
