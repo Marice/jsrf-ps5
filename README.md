@@ -14,9 +14,12 @@ on your machine from your own `default.xbe`, and the title reads the rest from y
 
 An early release. Tested on one console (etaHEN, ShadowMountPlus, the internal SSD):
 
-- Installing from a disc image, the start menu, the game's menus and play with sound and the DualSense
+- Installing from a disc image into `/data/jsrf-ps5`, the start menu, the game's menus and play with sound and the
+  DualSense, and loading a save
 - Busy stretches at 58 to 60 fps at render scale 2, output at 3840x2160
-- The camera on the right stick, saves, and keeping the game and saves across an update of the title
+
+Not tested yet: an update of the title keeping the game and saves (it should, see below), and the camera on the
+right stick on the console. The first start after the unpack takes a while before the picture appears.
 
 ## Installing
 

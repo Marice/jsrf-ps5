@@ -288,6 +288,12 @@ void jsrf_ps5_menu(const char *settings)
 	setenv("RECOMP_WIDESCREEN", g_wide ? "1" : "0", 1);
 	/* the engine has no window layer to ask (nv_window_pref_rstick_camera is upstream's weak "off"): it reads this */
 	setenv("RECOMP_RSTICK_CAMERA", g_camera ? "1" : "0", 1);
+	/* the engine's development reports only with DEBUG MODE on (D67): the sound ring once a second (D28), and the
+	   first kernel calls (upstream's budget, 200 by default) */
+	if (jsrf_ps5_debug)
+		setenv("RECOMP_APU_STATS", "1", 0);
+	else
+		setenv("RECOMP_KERNEL_LOG_BUDGET", "0", 0);
 	if (!jsrf_ps5_debug) {
 		extern uint32_t jsrf_vk_modes;
 		jsrf_vk_modes = 0; /* the settings file's vk_modes only with DEBUG MODE on */

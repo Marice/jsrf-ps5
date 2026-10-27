@@ -742,6 +742,7 @@ static void spread_over_cores(int number)
 	cpuset_t after_set;
 	CPU_ZERO(&after_set);
 	pthread_getaffinity_np(pthread_self(), sizeof(after_set), &after_set);
+	if (jsrf_ps5_debug)
 	fprintf(stderr, "jsrf: thread %d cores 0x%llx (process 0x%llx; %d/%d)%s now 0x%llx, priority %d, on core %d\n",
 	        number, before, all, r1, r2, widened ? ", widened:" : ",", mask_bits(&after_set),
 	        pthread_getprio(pthread_self()), sceKernelGetCurrentCpu());
@@ -767,6 +768,7 @@ static void* thread_trampoline(void* opaque)
 
 	char here;
 	t_stack_top = (uintptr_t)&here + 64;
+	if (jsrf_ps5_debug)
 	fprintf(stderr, "jsrf: thread %d started, stack %zu KiB near %p\n",
 	        launch.number, launch.stack / 1024, (void*)&here);
 	spread_over_cores(launch.number);

@@ -182,10 +182,33 @@ index 7375546..14a3a8d 100644
      if (argc > 1) g_game_dir_arg = argv[1];
      return host_main();
 diff --git a/port/recomp_manual.c b/port/recomp_manual.c
-index d3c43c9..a5b419c 100644
+index d3c43c9..e177b17 100644
 --- a/port/recomp_manual.c
 +++ b/port/recomp_manual.c
-@@ -2281,7 +2281,7 @@ void sub_00194210(void)
+@@ -614,6 +614,9 @@ static void cvfs_line(const char *what, uint32_t h, int extra)
+     static int lines;
+     uint8_t *m = (uint8_t *)g_xbox_mem_offset;
+     if (!h || h + 0x150 >= (64u << 20) || lines >= 3000) return;
++#if defined(JSRF_PS5)
++    if (!JSRF_PS5_LOGS) return;
++#endif
+     lines++;
+     fprintf(stderr, "[CVFS2] t=%.2f tid %lu %s h=%08X state=%u pend148=%u inflight14c=%u off=%u bytes=%u pos=%u total=%u %d\n",
+             jsrf_now(), (unsigned long)GetCurrentThreadId(), what, h, m[h + 1],
+@@ -675,7 +678,11 @@ void sub_0013D300(void)
+     {
+         static struct { uint32_t h, sig[6]; double t; uint32_t stm; } seen[8];
+         static int lines;
+-        if (h && h + 0x80 < (64u << 20) && lines < 2000) {
++        if (h && h + 0x80 < (64u << 20) && lines < 2000
++#if defined(JSRF_PS5)
++            && JSRF_PS5_LOGS
++#endif
++            ) {
+             uint32_t sig[6];
+             int i, slot = -1, changed;
+             double now = jsrf_now();
+@@ -2281,7 +2288,7 @@ void sub_00194210(void)
      uint32_t seen = *intr;
      sub_00194210_gen();
      *intr &= ~seen;
@@ -221,7 +244,7 @@ index 2b3b3f4..e91438d 100644
      # needed (and on an iPhone or an Android phone not there).
      target_link_libraries(xbox_kernel PUBLIC platform xbox_nv2a_gl)
 diff --git a/src/kernel/kernel_bridge.c b/src/kernel/kernel_bridge.c
-index f48dae6..f0676c5 100644
+index f48dae6..083a346 100644
 --- a/src/kernel/kernel_bridge.c
 +++ b/src/kernel/kernel_bridge.c
 @@ -54,10 +54,16 @@ uint32_t xbox_GetConnectedInterrupt(uint32_t vector);
@@ -382,7 +405,7 @@ index f48dae6..f0676c5 100644
  static DWORD WINAPI kernel_timer_thread(LPVOID unused)
  {
      int slot = xbox_worker_stack_alloc();
-@@ -2946,11 +3020,40 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
+@@ -2946,11 +3020,42 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
          g_fs_base = tib;
      }
  
@@ -403,6 +426,7 @@ index f48dae6..f0676c5 100644
 +        double ps5_last = ps5_ms();
 +        if (ps5_since == 0.0) ps5_since = ps5_last;
 +        if (ps5_last - ps5_since >= 2000.0) {
++            if (JSRF_PS5_LOGS) {
 +            fprintf(stderr, "  [TIMER] %lu rounds in %.0f ms; ms per round: sleep %.2f, watches %.2f, freeze %.2f, "
 +                    "vblank %.2f, pgraph %.2f, apu %.2f, cvfs %.2f, dpcs %.2f, timers %.2f\n",
 +                    ps5_rounds, ps5_last - ps5_since,
@@ -410,6 +434,7 @@ index f48dae6..f0676c5 100644
 +                    ps5_t[4] / ps5_rounds, ps5_t[5] / ps5_rounds, ps5_t[6] / ps5_rounds, ps5_t[7] / ps5_rounds,
 +                    ps5_t[8] / ps5_rounds);
 +            ps5_lock_sample_report();
++            }
 +            memset(ps5_t, 0, sizeof ps5_t);
 +            ps5_rounds = 0;
 +            ps5_since = ps5_last;
@@ -423,7 +448,7 @@ index f48dae6..f0676c5 100644
          /*
           * RECOMP_TABLE_WATCH=<addr>,<bytes>,<stride>: catch a pointer table
           * going bad at the moment it goes bad.
-@@ -3018,12 +3121,19 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
+@@ -3018,12 +3123,19 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
                  prev_valid = 1;
              }
          }
@@ -443,7 +468,7 @@ index f48dae6..f0676c5 100644
          now = (long long)GetTickCount64();
  
          for (i = 0; i < XBOX_MAX_TIMERS; i++) {
-@@ -3047,6 +3157,7 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
+@@ -3047,6 +3159,7 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
              if (dpc)
                  kernel_run_dpc(dpc, 0, 0);
          }
@@ -451,7 +476,7 @@ index f48dae6..f0676c5 100644
      }
  }
  
-@@ -3638,7 +3749,12 @@ static void deliver_one_apc(uint32_t apc_routine, uint32_t apc_context,
+@@ -3638,7 +3751,12 @@ static void deliver_one_apc(uint32_t apc_routine, uint32_t apc_context,
   * now. RECOMP_APC_INLINE=1 restores the old behaviour. */
  #define BRIDGE_APC_RING 32
  static RECOMP_TLS struct { uint32_t routine, context, iostatus; } t_apc_ring[BRIDGE_APC_RING];
@@ -464,7 +489,7 @@ index f48dae6..f0676c5 100644
  
  static void bridge_queue_apc(uint32_t apc_routine, uint32_t apc_context, uint32_t iostatus)
  {
-@@ -6149,7 +6265,11 @@ static void kernel_watch_arm_once(void)
+@@ -6149,7 +6267,11 @@ static void kernel_watch_arm_once(void)
   * SetThreadPriority arriving as NtSuspendThread(NULL), and GetThreadPriority
   * returning with esp 4 high and esi zeroed -- which took CRI's file handle
   * out of its register and stopped the music stream. */
@@ -476,7 +501,7 @@ index f48dae6..f0676c5 100644
  
  /* ── Guest scheduler lock: one guest thread runs at a time ──────────────
   *
-@@ -6169,6 +6289,32 @@ static RECOMP_TLS int g_kernel_dispatch_slot = -1;
+@@ -6169,6 +6291,32 @@ static RECOMP_TLS int g_kernel_dispatch_slot = -1;
   *
   * RECOMP_GUEST_LOCK=0 disables it. */
  static CRITICAL_SECTION g_guest_lock;
@@ -509,7 +534,7 @@ index f48dae6..f0676c5 100644
  static volatile unsigned long g_lock_owner;   /* see xbox_guest_lock_report */
  #ifdef __APPLE__
  #include <pthread.h>
-@@ -6258,6 +6404,33 @@ int32_t g_xbox_guest_cpu_preempt;
+@@ -6258,6 +6406,33 @@ int32_t g_xbox_guest_cpu_preempt;
  /* The holder's latest loop back edge and its IRQL there, for the [LOCK]
   * report. */
  static volatile uint32_t g_lock_owner_edge;
@@ -543,7 +568,7 @@ index f48dae6..f0676c5 100644
  static volatile unsigned g_lock_owner_irql;
  /* Interrupts delivered from inside a spin rather than on the timer thread. */
  static unsigned long g_spin_isrs;
-@@ -6284,7 +6457,11 @@ static long long     g_lock_wait_ms[LOCK_SLOTS];
+@@ -6284,7 +6459,11 @@ static long long     g_lock_wait_ms[LOCK_SLOTS];
  static long long     g_lock_hold_ms[LOCK_SLOTS];
  static unsigned long g_lock_takes[LOCK_SLOTS];
  static unsigned long g_lock_tid[LOCK_SLOTS];
@@ -555,7 +580,7 @@ index f48dae6..f0676c5 100644
  static int lock_watch(void)
  {
      static int on = -1;
-@@ -6313,9 +6490,15 @@ int xbox_guest_lock_idle_takes_lock(void)
+@@ -6313,9 +6492,15 @@ int xbox_guest_lock_idle_takes_lock(void)
      if (v < 0) v = getenv("RECOMP_LOCK_IDLE") ? 1 : 0;
      return v;
  }
@@ -571,7 +596,7 @@ index f48dae6..f0676c5 100644
  
  static int guest_lock_on(void)
  {
-@@ -7293,7 +7476,11 @@ typedef struct {
+@@ -7293,7 +7478,11 @@ typedef struct {
  } KThreadState;
  static KThreadState g_kthreads[KTHREAD_SLOTS];
  static volatile long g_kthread_n;
@@ -600,7 +625,7 @@ index 86ab3dd..0bb28e7 100644
  /* What this thread's IRQL is, for code outside this file.
   *
 diff --git a/src/kernel/kernel_path.c b/src/kernel/kernel_path.c
-index 8ec1ea0..3c508b5 100644
+index 8ec1ea0..afd52f7 100644
 --- a/src/kernel/kernel_path.c
 +++ b/src/kernel/kernel_path.c
 @@ -42,6 +42,13 @@ typedef struct {
@@ -623,7 +648,7 @@ index 8ec1ea0..3c508b5 100644
      if (!base || !*base || lstat(path, &st) == 0) return;
 +#if defined(JSRF_PS5)
 +    { static unsigned said;   /* why a case lookup fails here (jsrf-ps5 decision log D28) */
-+      if (errno != ENOENT && errno != ENOTDIR && said++ < 8)
++      if (errno != ENOENT && errno != ENOTDIR && JSRF_PS5_LOGS && said++ < 8)
 +          fprintf(stderr, "  [CASE] %s: lstat errno %d, so not looked up\n", path, errno); }
 +#endif
      if (errno != ENOENT && errno != ENOTDIR) return;
@@ -652,7 +677,7 @@ index 8ec1ea0..3c508b5 100644
              }
 +#if defined(JSRF_PS5)
 +            { static unsigned said;
-+              if (!found && said++ < 12) {
++              if (!found && JSRF_PS5_LOGS && said++ < 12) {
 +                  *sep = '\0';
 +                  fprintf(stderr, "  [CASE] '%s' not found in %s: opendir %s (errno %d), %d entries read\n",
 +                          p, path[0] ? path : "/", opened ? "ok" : "refused", open_errno, listed);
@@ -851,7 +876,7 @@ index f3668a7..05b3dc5 100644
  
  #define FPS_MAX 512
 diff --git a/src/kernel/xbox_memory_layout.c b/src/kernel/xbox_memory_layout.c
-index b18641c..54ef5bf 100644
+index b18641c..700b522 100644
 --- a/src/kernel/xbox_memory_layout.c
 +++ b/src/kernel/xbox_memory_layout.c
 @@ -214,6 +214,27 @@ static void nv2a_kick_signal(void)
@@ -981,7 +1006,7 @@ index b18641c..54ef5bf 100644
      }
      return v != 0;
  }
-@@ -797,11 +861,133 @@ static DWORD WINAPI nv2a_keeper_thread(LPVOID param)
+@@ -797,11 +861,135 @@ static DWORD WINAPI nv2a_keeper_thread(LPVOID param)
      return 0;
  }
  
@@ -1100,11 +1125,13 @@ index b18641c..54ef5bf 100644
 +        ps5a_t = ps5_prof_ms();
 +        if (ps5a_since == 0.0) ps5a_since = ps5a_t;
 +        if (ps5a_t - ps5a_since >= 2000.0) {
++            if (JSRF_PS5_LOGS) {
 +            fprintf(stderr, "  [ACK] %lu rounds in %.0f ms: handshake %.0f ms, walk %.0f ms, wait %.0f ms\n",
 +                    ps5a_rounds, ps5a_t - ps5a_since, ps5a[0], ps5a[1], ps5a[2]);
 +            ps5_method_report();
 +            { extern unsigned g_ps5p_frames; if (g_ps5p_frames == 0) ps5_walk_report(); }
 +            ps5_present_report(ps5a_t - ps5a_since);
++            }
 +            fflush(stderr);
 +            ps5a[0] = ps5a[1] = ps5a[2] = 0.0;
 +            ps5a_rounds = 0;
@@ -1115,7 +1142,7 @@ index b18641c..54ef5bf 100644
          vblank_intr_tick(regs);
          for (size_t i = 0; i < sizeof(NV2A_ACK) / sizeof(NV2A_ACK[0]); i++) {
              volatile uint32_t *r =
-@@ -827,7 +1013,17 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -827,7 +1015,17 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
                  (volatile uint32_t *)((char *)regs + NV2A_USER_DMA_PUT);
              volatile uint32_t *get =
                  (volatile uint32_t *)((char *)regs + NV2A_USER_DMA_GET);
@@ -1134,7 +1161,7 @@ index b18641c..54ef5bf 100644
                  *get = *put;
              }
          }
-@@ -835,6 +1031,9 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -835,6 +1033,9 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
          counter_mirrors_tick();
          frame_counters_tick();
          framebuffer_probe_tick();
@@ -1144,7 +1171,7 @@ index b18641c..54ef5bf 100644
  
          /* Which framebuffer the display would be scanning out.
           *
-@@ -873,9 +1072,17 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -873,9 +1074,17 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
                       * The contiguous window IS the physical-address view, so
                       * OR-ing its base is the documented round trip, not a
                       * guess. */
@@ -1163,7 +1190,7 @@ index b18641c..54ef5bf 100644
                      } else if (last_put && put < last_put) {
                          /* The ring wrapped: PUT went back to its start.
                           * The tail from the old PUT to the jump used to be
-@@ -885,10 +1092,37 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -885,10 +1094,37 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
                           * then from the jump's target to the new PUT. */
                          uint32_t from = XBOX_CONTIG_BASE | (last_put & 0x0FFFFFFFu);
                          uint32_t to   = XBOX_CONTIG_BASE | (put      & 0x0FFFFFFFu);
@@ -1203,7 +1230,7 @@ index b18641c..54ef5bf 100644
                          }
                      }
                      /* Periodic, because what the title submits at init is not
-@@ -901,6 +1135,11 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -901,6 +1137,11 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
                      }
                  }
                  last_put = put; last_put_ms = now_ms;
@@ -1215,7 +1242,7 @@ index b18641c..54ef5bf 100644
                  /* GET as well as PUT. A title that stops submitting has either
                   * finished or is spinning on the GPU catching up, and only GET
                   * tells those apart -- D3D waits for GET to reach PUT before it
-@@ -958,6 +1197,9 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -958,6 +1199,9 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
          *(volatile uint32_t *)((uintptr_t)(XBOX_KERNEL_DATA_BASE + KDATA_TICK_COUNT)
                                 + g_memory_offset) = GetTickCount();
  
@@ -1225,7 +1252,7 @@ index b18641c..54ef5bf 100644
          /* Yield -- or actually sleep, on a host with fewer cores than the
           * runtime has busy threads. RECOMP_ACK_SLEEP_US=<n> (default 200 on
           * POSIX) keeps this thread from eating a whole core; the pushbuffer
-@@ -985,6 +1227,9 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -985,6 +1229,9 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
              else Sleep(0);
  #endif
          }
@@ -1235,7 +1262,7 @@ index b18641c..54ef5bf 100644
      }
      return 0;
  }
-@@ -1035,7 +1280,87 @@ uint32_t g_xbox_code_hi = 0;
+@@ -1035,7 +1282,87 @@ uint32_t g_xbox_code_hi = 0;
  /* Global registers for recompiled code (via recomp_types.h) */
  /* Each guest thread's TIB. The first thread uses the one the loader built;
   * a spawned thread gets its own from xbox_AllocThreadTib(). */
@@ -1315,7 +1342,7 @@ index b18641c..54ef5bf 100644
 +            __atomic_store_n(&s_rf_pages[i].page, (uintptr_t)0, __ATOMIC_RELEASE);
 +        }
 +    }
-+    if (enter && __atomic_fetch_add(&said, 1, __ATOMIC_RELAXED) < 16)
++    if (enter && JSRF_PS5_LOGS && __atomic_fetch_add(&said, 1, __ATOMIC_RELAXED) < 16)
 +        fprintf(stderr, "  [REGFILE] register block %p found by the stack: %u pages from %#lx\n",
 +                (void *)rf, entered, (unsigned long)(first << 12));
 +}
@@ -1323,7 +1350,7 @@ index b18641c..54ef5bf 100644
  
  /* The shape of the TLS block the loader built, so a new thread can be
   * given one just like it: where the initialised image data starts, how
-@@ -1043,8 +1368,12 @@ RECOMP_TLS uint32_t g_fs_base = XBOX_TIB_MAIN;
+@@ -1043,8 +1370,12 @@ RECOMP_TLS uint32_t g_fs_base = XBOX_TIB_MAIN;
   * at is. Zero total means the image had no TLS directory. */
  static uint32_t g_tls_template_va, g_tls_total, g_tls_thread_size = 64;
  
@@ -1336,7 +1363,7 @@ index b18641c..54ef5bf 100644
  
  #ifdef RECOMP_ABI_CHECK
  /* Report a lifted function that returned without restoring ebx/esi/edi.
-@@ -1189,19 +1518,37 @@ void recomp_abi_violation_log(uint32_t va, uint32_t ebx0, uint32_t esi0,
+@@ -1189,19 +1520,37 @@ void recomp_abi_violation_log(uint32_t va, uint32_t ebx0, uint32_t esi0,
  #endif
  
  /* SEH frame pointer bridge (see recomp_types.h for explanation) */
@@ -1374,7 +1401,7 @@ index b18641c..54ef5bf 100644
  
  /* ---- non-local jumps ---------------------------------------------------
   *
-@@ -1220,7 +1567,11 @@ typedef struct {
+@@ -1220,7 +1569,11 @@ typedef struct {
  } recomp_jmp_slot;
  
  static RECOMP_TLS recomp_jmp_slot s_jmp[RECOMP_JMPBUF_SLOTS];
@@ -1386,7 +1413,7 @@ index b18641c..54ef5bf 100644
  
  jmp_buf *recomp_setjmp_slot(uint32_t buf_va)
  {
-@@ -1385,13 +1736,23 @@ void xbox_WatchdogStart(void)
+@@ -1385,13 +1738,23 @@ void xbox_WatchdogStart(void)
  }
  
  /* SSE. 128 bits of architectural state, per-thread like the rest. */
@@ -1410,7 +1437,7 @@ index b18641c..54ef5bf 100644
  
  /* EFLAGS.DF. Zero means the string instructions walk forwards, which is the
   * ABI's resting state and what almost every one of them does -- so this is
-@@ -1400,10 +1761,14 @@ RECOMP_TLS uint32_t g_ebp = 0;
+@@ -1400,10 +1763,14 @@ RECOMP_TLS uint32_t g_ebp = 0;
   * `std; repne scasb`, and memmove goes backwards when its regions overlap the
   * wrong way. Thread-local, because `std` and the `cld` that undoes it can land
   * in different lifted bodies of the same guest routine. */
@@ -1425,7 +1452,7 @@ index b18641c..54ef5bf 100644
  
  /* ICALL trace ring buffer */
  volatile uint32_t g_icall_trace[16] = {0};
-@@ -1515,7 +1880,20 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -1515,7 +1882,20 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
           */
  #if !defined(_WIN32)
          {
@@ -1510,7 +1537,7 @@ index 5155c7a..9ddb625 100644
  #ifdef __cplusplus
  }
 diff --git a/src/nv2a_gl/nv2a_gl.c b/src/nv2a_gl/nv2a_gl.c
-index 39c1ce9..3b140d7 100644
+index 39c1ce9..fc56a8c 100644
 --- a/src/nv2a_gl/nv2a_gl.c
 +++ b/src/nv2a_gl/nv2a_gl.c
 @@ -1128,6 +1128,9 @@ static uint32_t fnv(const void *p, size_t n)
@@ -1766,7 +1793,33 @@ index 39c1ce9..3b140d7 100644
              live[nlive].base = inl
                  ? (const uint8_t *)S.inline_buf + a->offset
                  : guest(resolve(a->offset));
-@@ -9958,11 +10149,17 @@ static void present(int is_frame)
+@@ -6735,7 +6926,11 @@ static void do_draw_body(void)
+         static double last_pos; static int per_burst;
+         double now_pos = g_frame_clock;
+         if (now_pos - last_pos > 5.0) { last_pos = now_pos; per_burst = 0; }
+-        if (per_burst < 4 && now_pos - last_pos < 0.25) {
++        if (per_burst < 4 && now_pos - last_pos < 0.25
++#if defined(JSRF_PS5)
++            && JSRF_PS5_LOGS
++#endif
++            ) {
+             Nv2aVshProgram vp2;
+             uint32_t ps2 = S.prog_start < NV2A_VSH_MAX_INSNS ? S.prog_start : 0;
+             int len2 = nv2a_vsh_decode(S.prog + ps2 * 4,
+@@ -7576,7 +7771,11 @@ static void do_draw_body(void)
+         /* Arming in the middle of a frame shows only its tail, which is
+          * exactly the part that cannot answer the question. Wait for the
+          * frame to turn over, then record that whole frame. */
+-        if (tl_frame == 0xFFFFFFFFu && !tl_arm && now_tl - last_tl > 5.0)
++        if (tl_frame == 0xFFFFFFFFu && !tl_arm && now_tl - last_tl > 5.0
++#if defined(JSRF_PS5)
++            && JSRF_PS5_LOGS
++#endif
++            )
+             tl_arm = 1;
+         if (tl_arm && S.frames != tl_seen) {
+             tl_arm = 0; last_tl = now_tl; tl_frame = S.frames;
+@@ -9958,11 +10157,17 @@ static void present(int is_frame)
          }
      }
  
@@ -1784,7 +1837,7 @@ index 39c1ce9..3b140d7 100644
  
      /* Put the finished frame on screen: the surface the title has set up
       * when it flips, which is what the window showed while surfaces were
-@@ -10007,13 +10204,24 @@ static void present(int is_frame)
+@@ -10007,13 +10212,24 @@ static void present(int is_frame)
              if (g_presenter == 1) sdl_hand_over(nv2a_gfx_gl_fbo(prt), (int)pw, (int)ph);
              else
  #endif
@@ -1809,7 +1862,7 @@ index 39c1ce9..3b140d7 100644
  #if defined(NV2A_GL_USE_CGL)
          if (g_windowed && nv_window_should_close()) {
              fprintf(stderr, "  [GL] window closed; stopping\n");
-@@ -11888,7 +12096,11 @@ static int gfx_init(uint32_t w, uint32_t h)
+@@ -11888,7 +12104,11 @@ static int gfx_init(uint32_t w, uint32_t h)
      want_metal = 1;                   /* there is nothing else */
  #endif
      if (want_metal) {
@@ -5632,10 +5685,10 @@ index 0000000..9fbc2c7
 +const Nv2aGfx *nv2a_gfx_vk(void) { return &g_vk; }
 diff --git a/src/platform/recomp_regfile.h b/src/platform/recomp_regfile.h
 new file mode 100644
-index 0000000..e5cf3b7
+index 0000000..46332a0
 --- /dev/null
 +++ b/src/platform/recomp_regfile.h
-@@ -0,0 +1,117 @@
+@@ -0,0 +1,126 @@
 +/*
 + * recomp_regfile.h - the guest's registers in one thread-local block, on the
 + * PlayStation 5 (jsrf-ps5 decision log D46, after PS5_Burnout3's).
@@ -5661,6 +5714,15 @@ index 0000000..e5cf3b7
 +
 +#if defined(JSRF_PS5)
 +#include <stdint.h>
++
++/* The development reports in the log (periodic timings, stall dumps, frame timelines): written only with the start
++ * menu's DEBUG MODE on (ps5/jsrf_ps5_menu.c), so a player's log stays small (jsrf-ps5 decision log D67). */
++#ifdef __cplusplus
++extern "C" int jsrf_ps5_debug;
++#else
++extern int jsrf_ps5_debug;
++#endif
++#define JSRF_PS5_LOGS (jsrf_ps5_debug != 0)
 +
 +#define RECOMP_REGFILE 1
 +
