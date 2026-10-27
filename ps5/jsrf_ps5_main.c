@@ -2,11 +2,13 @@
  * are not there yet, the environment the desktop launchers set, then the engine (port/main.c host_main) on a thread
  * with a large stack, as port/android/jsrf_android.c does on Android.
  *
- * Folders, all in the title folder (/app0, writable under ShadowMountPlus):
+ * Folders: dump/ in the title folder (/app0, writable under ShadowMountPlus), the rest in /data/jsrf-ps5, which a
+ * ProsperoStore update does not replace (it replaces the title folder whole; decision log D64):
  *   dump/      the player's disc image (.iso), unpacked once into game/
  *   game/      the game's files (default.xbe and the rest), as on every other platform
- *   save/      the saves (upstream: JSRF_SAVE_DIR)
- *   settings   the engine's stored choices (upstream: JSRF_SETTINGS_FILE) */
+ *   save/      the saves and the shader cache (upstream: JSRF_SAVE_DIR)
+ *   settings   the engine's stored choices (upstream: JSRF_SETTINGS_FILE)
+ * When /data/jsrf-ps5 cannot be written, all of them stay in the title folder, as before. */
 #include <dirent.h>
 #include <errno.h>
 #include <pthread.h>
@@ -24,10 +26,10 @@
 
 #define TITLE_DIR "/app0"
 #define DUMP_DIR TITLE_DIR "/dump"
-#define GAME_DIR TITLE_DIR "/game"
-#define UNPACK_DIR TITLE_DIR "/game.unpacking"
-#define SAVE_DIR TITLE_DIR "/save"
-#define SETTINGS_FILE TITLE_DIR "/settings"
+#define DATA_DIR "/data/jsrf-ps5"
+/* The title folder as /data shows it, where a rename to DATA_DIR stays on one file system (/app0 is a mount of it). */
+#define TITLE_IN_DATA "/data/homebrew/PPSA69429"
+static char GAME_DIR[96], UNPACK_DIR[96], SAVE_DIR[96], SETTINGS_FILE[96];
 #define ISO_NAME "JSRF - Jet Set Radio Future (USA).iso"
 
 int jsrf_ps5_status_begin(void); /* jsrf_ps5_vk.c */
@@ -52,8 +54,7 @@ static const char *const k_env[][2] = {
 	{"RECOMP_APU_STATS", "1"}, /* dev builds: the sound ring once a second (decision log D28) */
 
 
-	{"JSRF_GAME_DIR", GAME_DIR}, {"JSRF_SAVE_DIR", SAVE_DIR}, {"JSRF_SETTINGS_FILE", SETTINGS_FILE},
-	{"TMPDIR", TITLE_DIR},
+	{"TMPDIR", TITLE_DIR}, /* JSRF_GAME_DIR, JSRF_SAVE_DIR and JSRF_SETTINGS_FILE: place_folders() */
 };
 
 __attribute__((constructor(102))) static void ps5_env(void)
@@ -166,6 +167,7 @@ static int on_progress(void *ctx, uint64_t done, uint64_t total)
 	return 0;
 }
 
+#if !defined(JSRF_PS5_RADV)
 /* ---- the game's folder listing ----
    A title may not read folders here (opendir is refused), and the game asks for its files in other cases than the
    disc has them (stage01.bin for Stage01.bin): upstream finds them by listing the folder (kernel_path.c), the bug
@@ -215,6 +217,8 @@ static int write_listing(const char *iso)
 	return 0;
 }
 
+#endif
+
 /* game/ from the disc image in dump/, through game.unpacking/ so a cut-off unpack is never taken for the game. */
 static int import_disc(void)
 {
@@ -238,8 +242,10 @@ static int import_disc(void)
 		fprintf(stderr, "jsrf: %s -> %s: %s\n", UNPACK_DIR, GAME_DIR, strerror(errno));
 		return stay_with("UNPACKING FAILED", "SEE JSRF.LOG IN THE TITLE FOLDER");
 	}
+#if !defined(JSRF_PS5_RADV) /* the platform's opendir lists folders there (D62): no dirs.txt */
 	if (write_listing(iso) != 0)
 		return stay_with("COULD NOT LIST THE GAME'S FOLDERS", "SEE JSRF.LOG IN THE TITLE FOLDER");
+#endif
 	fprintf(stderr, "jsrf: the disc image is unpacked; it may be removed from dump/\n");
 	return 0;
 }
@@ -338,23 +344,55 @@ static void measure_waits(void)
 	fflush(stderr);
 }
 
-/* Whether the title can keep the unpacked game and the saves in /data/jsrf-ps5, outside the title folder that a store
-   update may replace (decision log D63): only written to the log for now. A title's sandbox is said to have no /data
-   (ps5-payloader); this checks it here. */
-static void probe_data(void)
+/* Where name lives: in DATA_DIR when it can be written, moved there from the title folder once (a rename, through
+   the title folder's /data path when /app0's own is refused across the mount), and in the title folder otherwise or
+   when it cannot be moved (a title on another drive). */
+static void place(int data, const char *name, char *out, size_t cap)
 {
-	struct stat st;
-	int seen = stat("/data", &st) == 0, seen_errno = seen ? 0 : errno;
-	int made = mkdir("/data/jsrf-ps5", 0755) == 0 || errno == EEXIST, made_errno = made ? 0 : errno;
-	FILE *f = fopen("/data/jsrf-ps5/probe.txt", "w");
-	int wrote = f != NULL, wrote_errno = f ? 0 : errno;
-	if (f) {
-		fputs("written by the JSRF title\n", f);
-		fclose(f);
+	char from[128], via[128], to[128];
+	snprintf(from, sizeof from, "%s/%s", TITLE_DIR, name);
+	snprintf(via, sizeof via, "%s/%s", TITLE_IN_DATA, name);
+	snprintf(to, sizeof to, "%s/%s", DATA_DIR, name);
+	snprintf(out, cap, "%s", data ? to : from);
+	if (!data || exists(to) || !exists(from))
+		return;
+	int moved = rename(from, to) == 0, first_errno = moved ? 0 : errno;
+	if (!moved && exists(via))
+		moved = rename(via, to) == 0;
+	if (moved) {
+		fprintf(stderr, "jsrf: %s moved to %s\n", from, to);
+		return;
 	}
-	fprintf(stderr, "jsrf: /data from the title: stat %s (errno %d), mkdir /data/jsrf-ps5 %s (errno %d), "
-	        "write probe.txt %s (errno %d)\n", seen ? "ok" : "refused", seen_errno, made ? "ok" : "refused",
-	        made_errno, wrote ? "ok" : "refused", wrote_errno);
+	fprintf(stderr, "jsrf: %s not moved to %s (errno %d, then %d): kept where it is\n", from, to, first_errno, errno);
+	snprintf(out, cap, "%s", from);
+}
+
+static void place_folders(void)
+{
+	int data = (mkdir(DATA_DIR, 0755) == 0 || errno == EEXIST), made_errno = data ? 0 : errno;
+	if (data) {
+		char probe[128];
+		snprintf(probe, sizeof probe, "%s/.writable", DATA_DIR);
+		FILE *f = fopen(probe, "w");
+		data = f != NULL;
+		made_errno = f ? 0 : errno;
+		if (f) {
+			fclose(f);
+			unlink(probe);
+		}
+	}
+	if (!data)
+		fprintf(stderr, "jsrf: %s cannot be written (errno %d): the title folder keeps everything\n", DATA_DIR,
+		        made_errno);
+	place(data, "game", GAME_DIR, sizeof GAME_DIR);
+	place(data, "save", SAVE_DIR, sizeof SAVE_DIR);
+	place(data, "settings", SETTINGS_FILE, sizeof SETTINGS_FILE);
+	/* the unpack goes next to the game folder, so its rename stays on one file system */
+	snprintf(UNPACK_DIR, sizeof UNPACK_DIR, "%.*s/game.unpacking", (int)(strrchr(GAME_DIR, '/') - GAME_DIR), GAME_DIR);
+	setenv("JSRF_GAME_DIR", GAME_DIR, 0);
+	setenv("JSRF_SAVE_DIR", SAVE_DIR, 0);
+	setenv("JSRF_SETTINGS_FILE", SETTINGS_FILE, 0);
+	fprintf(stderr, "jsrf: folders: game %s, saves %s, settings %s\n", GAME_DIR, SAVE_DIR, SETTINGS_FILE);
 }
 
 int nv_ps5_main(int argc, char **argv, int (*host)(void));
@@ -364,15 +402,18 @@ int nv_ps5_main(int argc, char **argv, int (*host)(void))
 	(void)argv;
 	fprintf(stderr, "jsrf: JSRF Unleashed %s for PS5\n", JSRF_VERSION);
 	log_flexible("at the start");
-	probe_data();
+	place_folders();
 	jsrf_ps5_menu_prepare(SETTINGS_FILE); /* the kept output mode, before the display opens (D35) */
 	if (jsrf_ps5_status_begin() != 0)
 		return 1;
-	if (!exists(GAME_DIR "/default.xbe")) {
+	char xbe[128];
+	snprintf(xbe, sizeof xbe, "%s/default.xbe", GAME_DIR);
+	if (!exists(xbe)) {
 		status("LOOKING FOR YOUR DISC IMAGE", NULL, 0);
 		if (import_disc() != 0)
 			return 1;
 	}
+#if !defined(JSRF_PS5_RADV) /* the platform's opendir lists folders there (D62): no dirs.txt */
 	if (!exists(DIRS_FILE)) {
 		/* unpacked by a build before the listing: made now, from the image if it is still in dump/ */
 		char iso[512];
@@ -381,6 +422,7 @@ int nv_ps5_main(int argc, char **argv, int (*host)(void))
 			return stay_with("THE GAME NEEDS ITS DISC IMAGE ONCE MORE",
 			                 "PUT THE .ISO BACK IN DUMP/ (OR REMOVE GAME/ TO UNPACK AGAIN)");
 	}
+#endif
 	char why[640];
 	if (jsrf_xbe_check_folder(GAME_DIR, why, sizeof why) != JSRF_XBE_OK) {
 		fprintf(stderr, "jsrf: game/: %s\n", why);
