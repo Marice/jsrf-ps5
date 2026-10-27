@@ -600,10 +600,24 @@ index 86ab3dd..0bb28e7 100644
  /* What this thread's IRQL is, for code outside this file.
   *
 diff --git a/src/kernel/kernel_path.c b/src/kernel/kernel_path.c
-index 8ec1ea0..2282acd 100644
+index 8ec1ea0..3c508b5 100644
 --- a/src/kernel/kernel_path.c
 +++ b/src/kernel/kernel_path.c
-@@ -628,6 +628,11 @@ static void resolve_case(char *path, const char *base)
+@@ -42,6 +42,13 @@ typedef struct {
+ } path_rule;
+ 
+ static const path_rule s_rules[] = {
++#if defined(JSRF_PS5)
++    /* The saves (E:\UDATA, E:\TDATA) under save_dir, not in the game folder:
++     * a new import of the disc image replaces game/ (jsrf-ps5 decision log
++     * D63). Before Partition1, which maps the rest of E: to the game dir. */
++    { "\\Device\\Harddisk0\\Partition1\\UDATA", 1, "\\UDATA",   "/UDATA"      },
++    { "\\Device\\Harddisk0\\Partition1\\TDATA", 1, "\\TDATA",   "/TDATA"      },
++#endif
+     { "\\Device\\CdRom0\\",                   0, NULL,         NULL          },
+     { "\\Device\\Harddisk0\\Partition1\\",    0, NULL,         NULL          },
+     /* The rest of the disk. Partition 0 is the whole raw device, 2 holds
+@@ -628,6 +635,11 @@ static void resolve_case(char *path, const char *base)
      size_t blen;
      char *p;
      if (!base || !*base || lstat(path, &st) == 0) return;
@@ -615,7 +629,7 @@ index 8ec1ea0..2282acd 100644
      if (errno != ENOENT && errno != ENOTDIR) return;
      blen = strlen(base);
      if (strncmp(path, base, blen) != 0) return;
-@@ -644,15 +649,31 @@ static void resolve_case(char *path, const char *base)
+@@ -644,15 +656,31 @@ static void resolve_case(char *path, const char *base)
              *sep = '\0';
              d = opendir(path[0] ? path : "/");
              *sep = '/';

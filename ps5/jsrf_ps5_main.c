@@ -95,6 +95,25 @@ static int exists(const char *path)
 	return stat(path, &st) == 0;
 }
 
+/* The saves are kept in save/ (kernel_path.c maps E:\UDATA and E:\TDATA there, decision log D63), where a new import
+   of the disc image does not replace them. A game/ from an earlier build still holds them: moved once, by a rename in
+   the title folder, so nothing is copied. */
+static void move_saves(void)
+{
+	static const char *const kSaves[] = {"UDATA", "TDATA"};
+	for (size_t i = 0; i < sizeof kSaves / sizeof kSaves[0]; i++) {
+		char from[128], to[128];
+		snprintf(from, sizeof from, "%s/%s", GAME_DIR, kSaves[i]);
+		snprintf(to, sizeof to, "%s/%s", SAVE_DIR, kSaves[i]);
+		if (exists(to) || !exists(from))
+			continue;
+		if (rename(from, to) == 0)
+			fprintf(stderr, "jsrf: saves: %s moved to %s\n", from, to);
+		else
+			fprintf(stderr, "jsrf: saves: %s not moved to %s (errno %d)\n", from, to, errno);
+	}
+}
+
 /* The first .iso in dump/; the usual name when the folder cannot be listed. */
 #if defined(JSRF_PS5_RADV)
 /* RADV's link recipe binds opendir and its kin to the platform's own, which can list a folder; the --wrap names then
@@ -137,8 +156,8 @@ static int on_progress(void *ctx, uint64_t done, uint64_t total)
 		char line[64];
 		snprintf(line, sizeof line, "%d%% (%llu OF %llu MB)", percent, (unsigned long long)(done >> 20),
 		         (unsigned long long)(total >> 20));
-		/* about 3,200 files, 2.5 GB: about ten minutes on the console's own storage */
-		status3("UNPACKING YOUR DISC IMAGE, ONCE", line, "GRAB SOME SNACKS, THIS TAKES ABOUT 10 MINUTES...", 0);
+		/* about 3,200 files, 2.5 GB: about five minutes on the console's own storage */
+		status3("UNPACKING YOUR DISC IMAGE, ONCE.", line, "GRAB SOME SNACKS, THIS TAKES ABOUT 5 MINUTES...", 0);
 		if (percent % 10 == 0) {
 			fprintf(stderr, "jsrf: unpacking %s\n", line);
 			fflush(stderr); /* the log is buffered: the progress is in it as it happens */
@@ -319,6 +338,25 @@ static void measure_waits(void)
 	fflush(stderr);
 }
 
+/* Whether the title can keep the unpacked game and the saves in /data/jsrf-ps5, outside the title folder that a store
+   update may replace (decision log D63): only written to the log for now. A title's sandbox is said to have no /data
+   (ps5-payloader); this checks it here. */
+static void probe_data(void)
+{
+	struct stat st;
+	int seen = stat("/data", &st) == 0, seen_errno = seen ? 0 : errno;
+	int made = mkdir("/data/jsrf-ps5", 0755) == 0 || errno == EEXIST, made_errno = made ? 0 : errno;
+	FILE *f = fopen("/data/jsrf-ps5/probe.txt", "w");
+	int wrote = f != NULL, wrote_errno = f ? 0 : errno;
+	if (f) {
+		fputs("written by the JSRF title\n", f);
+		fclose(f);
+	}
+	fprintf(stderr, "jsrf: /data from the title: stat %s (errno %d), mkdir /data/jsrf-ps5 %s (errno %d), "
+	        "write probe.txt %s (errno %d)\n", seen ? "ok" : "refused", seen_errno, made ? "ok" : "refused",
+	        made_errno, wrote ? "ok" : "refused", wrote_errno);
+}
+
 int nv_ps5_main(int argc, char **argv, int (*host)(void));
 int nv_ps5_main(int argc, char **argv, int (*host)(void))
 {
@@ -326,6 +364,7 @@ int nv_ps5_main(int argc, char **argv, int (*host)(void))
 	(void)argv;
 	fprintf(stderr, "jsrf: JSRF Unleashed %s for PS5\n", JSRF_VERSION);
 	log_flexible("at the start");
+	probe_data();
 	jsrf_ps5_menu_prepare(SETTINGS_FILE); /* the kept output mode, before the display opens (D35) */
 	if (jsrf_ps5_status_begin() != 0)
 		return 1;
@@ -337,7 +376,7 @@ int nv_ps5_main(int argc, char **argv, int (*host)(void))
 	if (!exists(DIRS_FILE)) {
 		/* unpacked by a build before the listing: made now, from the image if it is still in dump/ */
 		char iso[512];
-		status("LISTING THE GAME'S FOLDERS, ONCE", NULL, 0);
+		status("LISTING THE GAME'S FOLDERS, ONCE.", NULL, 0);
 		if (find_iso(iso, sizeof iso) != 0 || write_listing(iso) != 0)
 			return stay_with("THE GAME NEEDS ITS DISC IMAGE ONCE MORE",
 			                 "PUT THE .ISO BACK IN DUMP/ (OR REMOVE GAME/ TO UNPACK AGAIN)");
@@ -377,6 +416,7 @@ int nv_ps5_main(int argc, char **argv, int (*host)(void))
 	if (jsrf_ps5_gl_prepare() != 0)
 		return stay_with("NO OPENGL CONTEXT FOR THE RENDERER", "SEE JSRF.LOG IN THE TITLE FOLDER");
 	mkdir(SAVE_DIR, 0755);
+	move_saves();
 	chdir(GAME_DIR);
 
 	struct host_call call = {host, 1};
