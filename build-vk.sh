@@ -6,12 +6,12 @@
 #   tools/setup-source.sh   once: upstream at the pinned commit, with patches/jsrf.patch
 #   ./build-vk.sh
 #
-# The title is PPSA69429: its eboot.bin goes next to the unpacked game.
+# The title is PPSA69431: its eboot.bin goes next to the unpacked game.
 set -euo pipefail
 
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 workspace=$(cd -- "$root/.." && pwd)
-title_id=PPSA69429
+title_id=PPSA69431
 : "${RADV_ROOT:=$workspace/rush2-ps5/radv/mihawk-vulkan-review}"
 sdk_root="$RADV_ROOT/.deps/native/ps5-payload-sdk"
 PACBREW=$("$root/tools/setup-pacbrew.sh")
@@ -49,4 +49,7 @@ cp "$root/sce_sys/param.json" "$root/sce_sys/icon0.png" "$title/sce_sys/"
 for pic in pic0.dds pic1.dds; do
     [ -f "$root/sce_sys/$pic" ] && cp "$root/sce_sys/$pic" "$title/sce_sys/"
 done
+# The player's disc image goes here (README); an empty folder shows where.
+mkdir -p "$title/dump"
+printf 'Put your Jet Set Radio Future (USA) disc image (.iso) in this folder.\n' > "$title/dump/PUT-THE-DISC-IMAGE-HERE.txt"
 ls -la "$title"

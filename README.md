@@ -4,7 +4,7 @@
 
 A port of [JSRF Unleashed](https://github.com/JuMatt/JetSetRadioFuture-Unleashed) (0.5.9, commit `414b103`) to
 native PS5 homebrew. JSRF Unleashed is Jet Set Radio Future, statically recompiled from the Xbox executable into C.
-On the PS5 it runs as an installed title (`PPSA69429`) and draws through a Vulkan renderer on
+On the PS5 it runs as an installed title (`PPSA69431`) and draws through a Vulkan renderer on
 [Mihawk's RADV port](https://github.com/mihawk-99/PS5_Vulkan).
 
 You need your own copy of the game. This repository holds no game data and no game code: the C code is generated
@@ -24,8 +24,8 @@ register block, a fix for a hang at the first boss, and a shader cache on disk.
 
 There is no release yet. With a build of your own (see below):
 
-1. Copy the `pkg-vk/PPSA69429` folder to `/data/homebrew/` on the console (ShadowMountPlus installs it).
-2. Put your disc image of **Jet Set Radio Future (USA)**, a `.iso` file, in `/data/homebrew/PPSA69429/dump/`.
+1. Copy the `pkg-vk/PPSA69431` folder to `/data/homebrew/` on the console (ShadowMountPlus installs it).
+2. Put your disc image of **Jet Set Radio Future (USA)**, a `.iso` file, in `/data/homebrew/PPSA69431/dump/`.
 3. Start the title. The first start checks the image and unpacks it into the title folder's `game/` folder. This
    happens once and takes several minutes. After that you can remove the disc image.
 
@@ -52,7 +52,7 @@ Then:
    `patches/jsrf.patch`.
 2. Generate the game's C code in `src-upstream/`, as upstream's README describes under building from source: put
    your `default.xbe` in `src-upstream/game_files/` and run its tools into `port/recomp/gen`.
-3. `./build-vk.sh` builds the title into `pkg-vk/PPSA69429`. `tools/setup-pacbrew.sh` fetches the PacBrew ports
+3. `./build-vk.sh` builds the title into `pkg-vk/PPSA69431`. `tools/setup-pacbrew.sh` fetches the PacBrew ports
    (checked by hash) on the first run. A full build compiles over a million lines of generated C. On a machine with
    little memory, limit the parallel compiles, for example `JOBS=4 ./build-vk.sh`.
 

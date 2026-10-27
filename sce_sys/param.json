@@ -7,9 +7,9 @@
   "attribute": 0,
   "attribute2": 0,
   "attribute3": 0,
-  "conceptId": "69429",
+  "conceptId": "69431",
   "contentBadgeType": 1,
-  "contentId": "UP9000-PPSA69429_00-JSRFUNLEASHED000",
+  "contentId": "UP9000-PPSA69431_00-JSRFUNLEASHED000",
   "contentVersion": "00.001.000",
   "downloadDataSize": 0,
   "gameIntent": {
@@ -22,7 +22,7 @@
   "localizedParameters": {
     "defaultLanguage": "en-US",
     "en-US": {
-      "titleName": "JSRF Unleashed (dev)"
+      "titleName": "JSRF Unleashed"
     }
   },
   "masterVersion": "01.00",
@@ -33,6 +33,6 @@
   },
   "requiredSystemSoftwareVersion": "0x0000000000000000",
   "sdkVersion": "0x0000000000000000",
-  "titleId": "PPSA69429",
+  "titleId": "PPSA69431",
   "versionFileUri": ""
 }

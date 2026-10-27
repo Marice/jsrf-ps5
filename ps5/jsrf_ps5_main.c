@@ -28,7 +28,7 @@
 #define DUMP_DIR TITLE_DIR "/dump"
 #define DATA_DIR "/data/jsrf-ps5"
 /* The title folder as /data shows it, where a rename to DATA_DIR stays on one file system (/app0 is a mount of it). */
-#define TITLE_IN_DATA "/data/homebrew/PPSA69429"
+#define TITLE_IN_DATA "/data/homebrew/PPSA69431"
 static char GAME_DIR[96], UNPACK_DIR[96], SAVE_DIR[96], SETTINGS_FILE[96];
 #define ISO_NAME "JSRF - Jet Set Radio Future (USA).iso"
 
@@ -94,6 +94,34 @@ static int exists(const char *path)
 {
 	struct stat st;
 	return stat(path, &st) == 0;
+}
+
+/* Folders 0777 and files 0666 under path, so that a player's FTP client can replace or remove them: the title owns
+   what it makes, and the console's FTP server refused to delete in its 0755 folders (decision log D65). Only what is
+   not so yet is changed; returns how many. */
+static unsigned open_tree(const char *path)
+{
+	struct stat st;
+	if (stat(path, &st) != 0)
+		return 0;
+	const int folder = S_ISDIR(st.st_mode);
+	const mode_t want = folder ? 0777 : 0666;
+	unsigned changed = (st.st_mode & 0777) != want && chmod(path, want) == 0;
+	if (!folder)
+		return changed;
+	DIR *d = opendir(path);
+	if (!d)
+		return changed;
+	struct dirent *e;
+	char child[512];
+	while ((e = readdir(d)) != NULL) {
+		if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, ".."))
+			continue;
+		snprintf(child, sizeof child, "%s/%s", path, e->d_name);
+		changed += open_tree(child);
+	}
+	closedir(d);
+	return changed;
 }
 
 /* The saves are kept in save/ (kernel_path.c maps E:\UDATA and E:\TDATA there, decision log D63), where a new import
@@ -369,7 +397,7 @@ static void place(int data, const char *name, char *out, size_t cap)
 
 static void place_folders(void)
 {
-	int data = (mkdir(DATA_DIR, 0755) == 0 || errno == EEXIST), made_errno = data ? 0 : errno;
+	int data = (mkdir(DATA_DIR, 0777) == 0 || errno == EEXIST), made_errno = data ? 0 : errno;
 	if (data) {
 		char probe[128];
 		snprintf(probe, sizeof probe, "%s/.writable", DATA_DIR);
@@ -389,6 +417,8 @@ static void place_folders(void)
 	place(data, "settings", SETTINGS_FILE, sizeof SETTINGS_FILE);
 	/* the unpack goes next to the game folder, so its rename stays on one file system */
 	snprintf(UNPACK_DIR, sizeof UNPACK_DIR, "%.*s/game.unpacking", (int)(strrchr(GAME_DIR, '/') - GAME_DIR), GAME_DIR);
+	if (data)
+		chmod(DATA_DIR, 0777);
 	setenv("JSRF_GAME_DIR", GAME_DIR, 0);
 	setenv("JSRF_SAVE_DIR", SAVE_DIR, 0);
 	setenv("JSRF_SETTINGS_FILE", SETTINGS_FILE, 0);
@@ -423,6 +453,14 @@ int nv_ps5_main(int argc, char **argv, int (*host)(void))
 			                 "PUT THE .ISO BACK IN DUMP/ (OR REMOVE GAME/ TO UNPACK AGAIN)");
 	}
 #endif
+	{
+		/* once: after the import, or a game folder an earlier build made 0755 */
+		struct stat st;
+		if (stat(GAME_DIR, &st) == 0 && (st.st_mode & 0777) != 0777) {
+			status("PREPARING THE GAME FOLDER, ONCE.", NULL, 0);
+			fprintf(stderr, "jsrf: %u game files and folders opened to FTP (0777/0666)\n", open_tree(GAME_DIR));
+		}
+	}
 	char why[640];
 	if (jsrf_xbe_check_folder(GAME_DIR, why, sizeof why) != JSRF_XBE_OK) {
 		fprintf(stderr, "jsrf: game/: %s\n", why);
@@ -457,8 +495,13 @@ int nv_ps5_main(int argc, char **argv, int (*host)(void))
 	}
 	if (jsrf_ps5_gl_prepare() != 0)
 		return stay_with("NO OPENGL CONTEXT FOR THE RENDERER", "SEE JSRF.LOG IN THE TITLE FOLDER");
-	mkdir(SAVE_DIR, 0755);
+	mkdir(SAVE_DIR, 0777);
 	move_saves();
+	{
+		unsigned n = open_tree(SAVE_DIR) + open_tree(SETTINGS_FILE);
+		if (n)
+			fprintf(stderr, "jsrf: %u saves and folders opened to FTP (0777/0666)\n", n);
+	}
 	chdir(GAME_DIR);
 
 	struct host_call call = {host, 1};
