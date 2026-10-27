@@ -31,7 +31,8 @@ cmake -B "$build" -S "$root" \
     -DPKG_CONFIG_EXECUTABLE="$root/ps5/ps5-pkg-config" \
     -DCMAKE_PREFIX_PATH="$PACBREW" -DCMAKE_FIND_ROOT_PATH="$PACBREW" \
     -DCMAKE_BUILD_TYPE=Release
-cmake --build "$build" -j"$(nproc)"
+# JOBS: fewer parallel compiles for a machine that swaps on the generated sources (each a few GB at -O2)
+cmake --build "$build" -j"${JOBS:-$(nproc)}"
 
 # The ELF becomes a title binary: converted against the SDK fork's module stubs and the AGC link stubs, then signed.
 pkg="$root/pkg-vk"

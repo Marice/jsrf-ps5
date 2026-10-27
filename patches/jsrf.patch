@@ -1,8 +1,8 @@
 diff --git a/port/CMakeLists.txt b/port/CMakeLists.txt
-index 338ca13..cf975a6 100644
+index b493689..9930cf9 100644
 --- a/port/CMakeLists.txt
 +++ b/port/CMakeLists.txt
-@@ -186,6 +186,9 @@ elseif(ANDROID)
+@@ -215,6 +215,9 @@ elseif(ANDROID)
      # they stay in the dynamic symbol table, which is what names them in a
      # crash report.
      target_link_options(jsrf_recomp PRIVATE -Wl,--no-undefined -Wl,-Bsymbolic)
@@ -87,10 +87,10 @@ index d68ccf1..914a97a 100644
   * whatever it is: how many were read, or -1. */
  long xiso_head(const char *path, unsigned char *buf, size_t n);
 diff --git a/port/main.c b/port/main.c
-index 3ec36d6..cd89ce0 100644
+index 7375546..14a3a8d 100644
 --- a/port/main.c
 +++ b/port/main.c
-@@ -103,19 +103,37 @@ int recomp_dispatch_init(void);
+@@ -118,19 +118,37 @@ int recomp_dispatch_init(void);
   * host side then writes g_esp somewhere the generated code never reads, so the
   * guest starts with every register at zero and faults immediately, having
   * apparently ignored the setup that visibly ran. */
@@ -128,7 +128,7 @@ index 3ec36d6..cd89ce0 100644
  extern ptrdiff_t g_xbox_mem_offset;
  
  /* ── XBE Constants ─────────────────────────────────────────── */
-@@ -159,6 +177,11 @@ void recomp_restart_self(void)
+@@ -174,6 +192,11 @@ void recomp_restart_self(void)
       * A choice made in game (F9) is stored, and applies at the next start. */
      fprintf(stderr, "  [WIN] restart: not on Android -- the choice applies at the next start\n");
      return;
@@ -140,7 +140,7 @@ index 3ec36d6..cd89ce0 100644
  #endif
      if (!g_argv || !g_argv[0]) return;
      fflush(stdout); fflush(stderr);
-@@ -677,9 +700,13 @@ static int host_main(void)
+@@ -692,9 +715,13 @@ static int host_main(void)
      size_t xbe_size = 0;
  
  
@@ -155,7 +155,7 @@ index 3ec36d6..cd89ce0 100644
  
      printf("=== JSRF Unleashed %s -- Jet Set Radio Future, statically recompiled ===\n",
             JSRF_VERSION);
-@@ -719,6 +746,9 @@ static int host_main(void)
+@@ -744,6 +771,9 @@ static int host_main(void)
                  }
              }
          }
@@ -165,7 +165,7 @@ index 3ec36d6..cd89ce0 100644
  #else
          struct sigaction sa; memset(&sa, 0, sizeof sa);
          sa.sa_sigaction = segv_handler; sa.sa_flags = SA_SIGINFO;
-@@ -1142,6 +1172,15 @@ int main(int argc, char **argv)
+@@ -1167,6 +1197,15 @@ int main(int argc, char **argv)
          extern int nv_android_main(int argc, char **argv, int (*host)(void));
          return nv_android_main(argc, argv, host_main);
      }
@@ -182,7 +182,7 @@ index 3ec36d6..cd89ce0 100644
      if (argc > 1) g_game_dir_arg = argv[1];
      return host_main();
 diff --git a/port/recomp_manual.c b/port/recomp_manual.c
-index 211b68d..bfd775c 100644
+index f2f8118..07c8628 100644
 --- a/port/recomp_manual.c
 +++ b/port/recomp_manual.c
 @@ -2281,7 +2281,7 @@ void sub_00194210(void)
@@ -837,7 +837,7 @@ index f3668a7..05b3dc5 100644
  
  #define FPS_MAX 512
 diff --git a/src/kernel/xbox_memory_layout.c b/src/kernel/xbox_memory_layout.c
-index 99d17e7..5915268 100644
+index d87596d..9eb74cb 100644
 --- a/src/kernel/xbox_memory_layout.c
 +++ b/src/kernel/xbox_memory_layout.c
 @@ -214,6 +214,27 @@ static void nv2a_kick_signal(void)
@@ -876,7 +876,7 @@ index 99d17e7..5915268 100644
  void xbox_nv2a_kick(void)
  {
      if (s_kick_on < 0) { const char *e = getenv("RECOMP_NV2A_KICK"); s_kick_on = e ? atoi(e) : 1; }
-@@ -682,23 +704,67 @@ static void framebuffer_probe_tick(void)
+@@ -682,24 +704,69 @@ static void framebuffer_probe_tick(void)
   * is not -- and the acknowledgement de-asserts PMC_INTR_0's PCRTC bit, which
   * is what the handler's own spin loop is waiting for.
   */
@@ -918,7 +918,8 @@ index 99d17e7..5915268 100644
 +}
 +#endif
 +
- static void vblank_intr_tick(volatile uint32_t *regs)
+ /* 1 if it completed a vblank the title had acknowledged. */
+ static int vblank_intr_tick(volatile uint32_t *regs)
  {
      volatile uint32_t *pcrtc = (volatile uint32_t *)((char *)regs + 0x600100);
      volatile uint32_t *pmc   = (volatile uint32_t *)((char *)regs + 0x000100);
@@ -926,7 +927,7 @@ index 99d17e7..5915268 100644
 +    uint32_t v = __atomic_load_n(pcrtc, __ATOMIC_ACQUIRE);
  
      if (v & NV2A_VBLANK_PENDING_TAG)
-         return;                       /* raised, not yet acknowledged */
+         return 0;                     /* raised, not yet acknowledged */
  
      /* Acknowledged (or never raised): complete it. A PGRAPH software method
 -     * still with the title keeps its bit (see kernel_pgraph_tick). */
@@ -938,7 +939,8 @@ index 99d17e7..5915268 100644
 -    }
 +     * keeps its bit: that one is cleared by the title's PGRAPH handler (the
 +     * port's wrapper on it) and by nothing else (see kernel_pgraph_tick).
-+     * Both registers are also written by the thread that raises interrupts,
++     * Both registers are also written by the thread that raises interrupts
++     * (and this runs on two threads: the ack thread and the keeper),
 +     * so neither is read and stored whole: a vblank raised between the read
 +     * and the store keeps its bits, and so does a software method. This
 +     * thread once read "no software method in flight", the timer thread then
@@ -946,14 +948,14 @@ index 99d17e7..5915268 100644
 +     * nothing, never acknowledged it, no software method was raised again,
 +     * and the make-space wait at 0x0019151B slept for good (jsrf-ps5 D56). */
 +    if (v && !__atomic_compare_exchange_n(pcrtc, &v, 0u, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
-+        return;                       /* raised again meanwhile */
++        return 0;                     /* raised again meanwhile */
 +    if (__atomic_load_n(pmc, __ATOMIC_ACQUIRE) & ~(1u << 12))
 +        __atomic_fetch_and(pmc, 1u << 12, __ATOMIC_ACQ_REL);
+     return v != 0;
  }
  
- /* The same, for code that keeps this thread away from its loop.
-@@ -718,10 +784,132 @@ void xbox_nv2a_vblank_service(void)
-     if (g_nv2a_memory) vblank_intr_tick((volatile uint32_t *)g_nv2a_memory);
+@@ -773,11 +840,133 @@ static DWORD WINAPI nv2a_keeper_thread(LPVOID param)
+     return 0;
  }
  
 +#if defined(JSRF_PS5)
@@ -1066,6 +1068,7 @@ index 99d17e7..5915268 100644
 +    s_ack_regs = regs;   /* xbox_nv2a_flush_ack (D52) */
 +#endif
      while (!InterlockedCompareExchange(&g_nv2a_ack_stop, 0, 0)) {
+         s_ack_top_ms = (long long)GetTickCount64();
 +#if defined(JSRF_PS5)
 +        ps5a_t = ps5_prof_ms();
 +        if (ps5a_since == 0.0) ps5a_since = ps5a_t;
@@ -1085,7 +1088,7 @@ index 99d17e7..5915268 100644
          vblank_intr_tick(regs);
          for (size_t i = 0; i < sizeof(NV2A_ACK) / sizeof(NV2A_ACK[0]); i++) {
              volatile uint32_t *r =
-@@ -747,7 +935,17 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -803,7 +992,17 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
                  (volatile uint32_t *)((char *)regs + NV2A_USER_DMA_PUT);
              volatile uint32_t *get =
                  (volatile uint32_t *)((char *)regs + NV2A_USER_DMA_GET);
@@ -1104,7 +1107,7 @@ index 99d17e7..5915268 100644
                  *get = *put;
              }
          }
-@@ -755,6 +953,9 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -811,6 +1010,9 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
          counter_mirrors_tick();
          frame_counters_tick();
          framebuffer_probe_tick();
@@ -1114,7 +1117,7 @@ index 99d17e7..5915268 100644
  
          /* Which framebuffer the display would be scanning out.
           *
-@@ -793,9 +994,17 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -849,9 +1051,17 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
                       * The contiguous window IS the physical-address view, so
                       * OR-ing its base is the documented round trip, not a
                       * guess. */
@@ -1133,7 +1136,7 @@ index 99d17e7..5915268 100644
                      } else if (last_put && put < last_put) {
                          /* The ring wrapped: PUT went back to its start.
                           * The tail from the old PUT to the jump used to be
-@@ -805,10 +1014,37 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -861,10 +1071,37 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
                           * then from the jump's target to the new PUT. */
                          uint32_t from = XBOX_CONTIG_BASE | (last_put & 0x0FFFFFFFu);
                          uint32_t to   = XBOX_CONTIG_BASE | (put      & 0x0FFFFFFFu);
@@ -1173,7 +1176,7 @@ index 99d17e7..5915268 100644
                          }
                      }
                      /* Periodic, because what the title submits at init is not
-@@ -821,6 +1057,11 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -877,6 +1114,11 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
                      }
                  }
                  last_put = put; last_put_ms = now_ms;
@@ -1185,7 +1188,7 @@ index 99d17e7..5915268 100644
                  /* GET as well as PUT. A title that stops submitting has either
                   * finished or is spinning on the GPU catching up, and only GET
                   * tells those apart -- D3D waits for GET to reach PUT before it
-@@ -878,6 +1119,9 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -934,6 +1176,9 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
          *(volatile uint32_t *)((uintptr_t)(XBOX_KERNEL_DATA_BASE + KDATA_TICK_COUNT)
                                 + g_memory_offset) = GetTickCount();
  
@@ -1195,7 +1198,7 @@ index 99d17e7..5915268 100644
          /* Yield -- or actually sleep, on a host with fewer cores than the
           * runtime has busy threads. RECOMP_ACK_SLEEP_US=<n> (default 200 on
           * POSIX) keeps this thread from eating a whole core; the pushbuffer
-@@ -905,6 +1149,9 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -961,6 +1206,9 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
              else Sleep(0);
  #endif
          }
@@ -1205,7 +1208,7 @@ index 99d17e7..5915268 100644
      }
      return 0;
  }
-@@ -951,7 +1198,87 @@ uint32_t g_xbox_code_hi = 0;
+@@ -1010,7 +1258,87 @@ uint32_t g_xbox_code_hi = 0;
  /* Global registers for recompiled code (via recomp_types.h) */
  /* Each guest thread's TIB. The first thread uses the one the loader built;
   * a spawned thread gets its own from xbox_AllocThreadTib(). */
@@ -1293,7 +1296,7 @@ index 99d17e7..5915268 100644
  
  /* The shape of the TLS block the loader built, so a new thread can be
   * given one just like it: where the initialised image data starts, how
-@@ -959,8 +1286,12 @@ RECOMP_TLS uint32_t g_fs_base = XBOX_TIB_MAIN;
+@@ -1018,8 +1346,12 @@ RECOMP_TLS uint32_t g_fs_base = XBOX_TIB_MAIN;
   * at is. Zero total means the image had no TLS directory. */
  static uint32_t g_tls_template_va, g_tls_total, g_tls_thread_size = 64;
  
@@ -1306,7 +1309,7 @@ index 99d17e7..5915268 100644
  
  #ifdef RECOMP_ABI_CHECK
  /* Report a lifted function that returned without restoring ebx/esi/edi.
-@@ -1105,19 +1436,37 @@ void recomp_abi_violation_log(uint32_t va, uint32_t ebx0, uint32_t esi0,
+@@ -1164,19 +1496,37 @@ void recomp_abi_violation_log(uint32_t va, uint32_t ebx0, uint32_t esi0,
  #endif
  
  /* SEH frame pointer bridge (see recomp_types.h for explanation) */
@@ -1344,7 +1347,7 @@ index 99d17e7..5915268 100644
  
  /* ---- non-local jumps ---------------------------------------------------
   *
-@@ -1136,7 +1485,11 @@ typedef struct {
+@@ -1195,7 +1545,11 @@ typedef struct {
  } recomp_jmp_slot;
  
  static RECOMP_TLS recomp_jmp_slot s_jmp[RECOMP_JMPBUF_SLOTS];
@@ -1356,7 +1359,7 @@ index 99d17e7..5915268 100644
  
  jmp_buf *recomp_setjmp_slot(uint32_t buf_va)
  {
-@@ -1301,13 +1654,23 @@ void xbox_WatchdogStart(void)
+@@ -1360,13 +1714,23 @@ void xbox_WatchdogStart(void)
  }
  
  /* SSE. 128 bits of architectural state, per-thread like the rest. */
@@ -1380,7 +1383,7 @@ index 99d17e7..5915268 100644
  
  /* EFLAGS.DF. Zero means the string instructions walk forwards, which is the
   * ABI's resting state and what almost every one of them does -- so this is
-@@ -1316,10 +1679,14 @@ RECOMP_TLS uint32_t g_ebp = 0;
+@@ -1375,10 +1739,14 @@ RECOMP_TLS uint32_t g_ebp = 0;
   * `std; repne scasb`, and memmove goes backwards when its regions overlap the
   * wrong way. Thread-local, because `std` and the `cld` that undoes it can land
   * in different lifted bodies of the same guest routine. */
@@ -1395,7 +1398,7 @@ index 99d17e7..5915268 100644
  
  /* ICALL trace ring buffer */
  volatile uint32_t g_icall_trace[16] = {0};
-@@ -1431,7 +1798,20 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -1490,7 +1858,20 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
           */
  #if !defined(_WIN32)
          {
@@ -1467,10 +1470,10 @@ index 257ba1c..6d8c2a5 100644
      nv2a_vsh.c
      nv2a_vsh_interp.c
 diff --git a/src/nv2a_gl/nv2a_backend.h b/src/nv2a_gl/nv2a_backend.h
-index 35a469a..c6a264d 100644
+index e49ef98..29d9479 100644
 --- a/src/nv2a_gl/nv2a_backend.h
 +++ b/src/nv2a_gl/nv2a_backend.h
-@@ -414,6 +414,8 @@ typedef struct Nv2aGfx {
+@@ -419,6 +419,8 @@ typedef struct Nv2aGfx {
   * device, no Metal in this build). */
  const Nv2aGfx *nv2a_gfx_gl(void);
  const Nv2aGfx *nv2a_gfx_metal(void);
@@ -1480,10 +1483,10 @@ index 35a469a..c6a264d 100644
  #ifdef __cplusplus
  }
 diff --git a/src/nv2a_gl/nv2a_gl.c b/src/nv2a_gl/nv2a_gl.c
-index 20c9273..1f32680 100644
+index 1137e89..9dd720f 100644
 --- a/src/nv2a_gl/nv2a_gl.c
 +++ b/src/nv2a_gl/nv2a_gl.c
-@@ -1107,6 +1107,9 @@ static uint32_t fnv(const void *p, size_t n)
+@@ -1108,6 +1108,9 @@ static uint32_t fnv(const void *p, size_t n)
  
  #if defined(NV2A_GL_USE_NONE)
  
@@ -1493,7 +1496,7 @@ index 20c9273..1f32680 100644
  /* No OpenGL in this build: Metal or nothing. */
  static int gl_init(uint32_t w, uint32_t h)
  {
-@@ -1791,18 +1794,169 @@ static void sdl_menu_command(unsigned id)
+@@ -1860,18 +1863,169 @@ static void sdl_menu_command(unsigned id)
   * 16:9 (the 640x480 surface holds a 16:9 view squeezed), anything else at its
   * own shape. One blit; every piece of GL state the renderer caches is put
   * back the way it was. */
@@ -1663,7 +1666,7 @@ index 20c9273..1f32680 100644
      if (ww <= 0 || wh <= 0) return;
      if (nv2a_wide_scene()) { fw = (int)(nv2a_wide_aspect() * 900.0f + 0.5f); fh = 900; }   /* 16:9 = 1600:900 */
      dw = ww; dh = wh;
-@@ -1810,21 +1964,32 @@ static void sdl_present(GLuint src_fbo, int sw, int sh)
+@@ -1879,21 +2033,32 @@ static void sdl_present(GLuint src_fbo, int sw, int sh)
      else                               dh = (int)((long)ww * fh / fw);
      glDisable(GL_SCISSOR_TEST);
      glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
@@ -1696,7 +1699,7 @@ index 20c9273..1f32680 100644
      { static int said;
        if (said < 3) {
            said++;
-@@ -5210,6 +5375,10 @@ static void do_draw_body(void)
+@@ -5300,6 +5465,10 @@ static void do_draw_body(void)
       */
      {
          uint32_t inputs = g_pcache[slot].inputs;
@@ -1707,7 +1710,7 @@ index 20c9273..1f32680 100644
          for (i = 0; i < NUM_ATTRS; i++) {
              const Attr *a = &S.attr[i];
              attr_at[i] = -1;
-@@ -5218,6 +5387,28 @@ static void do_draw_body(void)
+@@ -5308,6 +5477,28 @@ static void do_draw_body(void)
                  const_mask |= 1u << i;
                  continue;
              }
@@ -1736,7 +1739,7 @@ index 20c9273..1f32680 100644
              live[nlive].base = inl
                  ? (const uint8_t *)S.inline_buf + a->offset
                  : guest(resolve(a->offset));
-@@ -9780,11 +9971,17 @@ static void present(int is_frame)
+@@ -9881,11 +10072,17 @@ static void present(int is_frame)
          }
      }
  
@@ -1754,7 +1757,7 @@ index 20c9273..1f32680 100644
  
      /* Put the finished frame on screen: the surface the title has set up
       * when it flips, which is what the window showed while surfaces were
-@@ -9829,13 +10026,24 @@ static void present(int is_frame)
+@@ -9930,13 +10127,24 @@ static void present(int is_frame)
              if (g_presenter == 1) sdl_hand_over(nv2a_gfx_gl_fbo(prt), (int)pw, (int)ph);
              else
  #endif
@@ -1779,7 +1782,7 @@ index 20c9273..1f32680 100644
  #if defined(NV2A_GL_USE_CGL)
          if (g_windowed && nv_window_should_close()) {
              fprintf(stderr, "  [GL] window closed; stopping\n");
-@@ -11571,7 +11779,11 @@ static int gfx_init(uint32_t w, uint32_t h)
+@@ -11803,7 +12011,11 @@ static int gfx_init(uint32_t w, uint32_t h)
      want_metal = 1;                   /* there is nothing else */
  #endif
      if (want_metal) {
