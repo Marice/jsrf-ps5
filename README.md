@@ -2,6 +2,8 @@
 
 # JSRF Unleashed for the PlayStation 5
 
+[![Get it on RecompStore](https://recompstore.com/assets/press/badge-dark.svg)](https://recompstore.com/game/PPSA69423)
+
 A port of [JSRF Unleashed](https://github.com/JuMatt/JetSetRadioFuture-Unleashed) (0.5.9, commit `414b103`) to
 native PS5 homebrew. JSRF Unleashed is Jet Set Radio Future, statically recompiled from the Xbox executable into C.
 On the PS5 it runs as an installed title (`PPSA69431`) and draws through a Vulkan renderer on
