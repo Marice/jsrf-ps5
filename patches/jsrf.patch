@@ -182,7 +182,7 @@ index 7375546..14a3a8d 100644
      if (argc > 1) g_game_dir_arg = argv[1];
      return host_main();
 diff --git a/port/recomp_manual.c b/port/recomp_manual.c
-index d3c43c9..e177b17 100644
+index d3c43c9..a213ef3 100644
 --- a/port/recomp_manual.c
 +++ b/port/recomp_manual.c
 @@ -614,6 +614,9 @@ static void cvfs_line(const char *what, uint32_t h, int extra)
@@ -217,6 +217,27 @@ index d3c43c9..e177b17 100644
      g_eax = *intr;
      if (seen & 0x00100000u) xbox_nv2a_software_method_done();
  }
+@@ -4368,6 +4375,9 @@ static void rcam_apply(uint8_t *m, uint32_t cam)
+  * the mode's update from 0x215570, and returns early while +0x1E0 is set.
+  * Eye at +0x44, target at +0x5C. JSRF_CAM_LOG=1 prints every change of the
+  * mode inputs and the eye position once a second. */
++#if defined(JSRF_PS5)
++extern void jsrf_ps5_player_step(uint8_t *mem, uint32_t player) __attribute__((weak));
++#endif
+ extern void sub_000A5070_gen(void);
+ void sub_000A5070(void)
+ {
+@@ -4397,6 +4407,10 @@ void sub_000A5070(void)
+             s_player_pos[0] = chf[0xCA4 / 4]; s_player_pos[1] = chf[0xCA8 / 4];
+             s_player_pos[2] = chf[0xCAC / 4];
+             s_player_va = who;
++#if defined(JSRF_PS5)
++            /* the PS5 port's cheats and light bar (jsrf-ps5 ps5/jsrf_ps5_game.c, D72/D73) */
++            if (jsrf_ps5_player_step) jsrf_ps5_player_step((uint8_t *)(uintptr_t)m, who);
++#endif
+         }
+     }
+     save_menu_open_step();
 diff --git a/src/d3d/CMakeLists.txt b/src/d3d/CMakeLists.txt
 index ddf0005..0c8f828 100644
 --- a/src/d3d/CMakeLists.txt

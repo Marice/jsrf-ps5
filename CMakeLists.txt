@@ -23,7 +23,7 @@ set(THREADS_PREFER_PTHREAD_FLAG OFF)
 
 add_subdirectory(src-upstream/port "${CMAKE_BINARY_DIR}/port")
 
-target_sources(jsrf_recomp PRIVATE ps5/jsrf_ps5_vk.c ps5/jsrf_ps5_main.c ps5/jsrf_ps5_menu.c ps5/jsrf_ps5_screen.c ${PROSPERO_SUPPORT_SOURCES})
+target_sources(jsrf_recomp PRIVATE ps5/jsrf_ps5_vk.c ps5/jsrf_ps5_main.c ps5/jsrf_ps5_menu.c ps5/jsrf_ps5_screen.c ps5/jsrf_ps5_game.c ${PROSPERO_SUPPORT_SOURCES})
 target_include_directories(jsrf_recomp PRIVATE src-upstream/port)
 target_include_directories(jsrf_recomp PRIVATE ps5)
 target_link_libraries(jsrf_recomp PRIVATE SDL2::SDL2-static m)

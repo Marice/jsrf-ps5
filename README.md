@@ -53,7 +53,10 @@ them, up and down to choose a row, left and right to change it, and X on START G
 | WIDESCREEN | A wider 16:9 view, not a stretch |
 | SMAA | Smooths jagged edges over the finished picture (off by default) |
 | CAMERA | RIGHT STICK turns the camera around the skater; ORIGINAL keeps the game's own camera |
+| INFINITE CANS | Keeps your spray cans at the character's most. Nothing of it is saved. |
 | DEBUG MODE | Test modes on the touchpad, for development |
+
+In the game, the DualSense's light bar takes the colour of your character and flashes white when you boost.
 
 ## Building
 

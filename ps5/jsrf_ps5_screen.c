@@ -230,7 +230,7 @@ void jsrf_ps5_screen_menu(const char *title, const char *subtitle, const char *c
 	char row[96];
 	for (int i = 0; i < count; i++) {
 		if (values[i])
-			snprintf(row, sizeof row, i == selected ? "%-12s < %s >" : "%-12s   %s  ", labels[i], values[i]);
+			snprintf(row, sizeof row, i == selected ? "%-13s < %s >" : "%-13s   %s  ", labels[i], values[i]);
 		else
 			snprintf(row, sizeof row, i == selected ? "> %s <" : "%s", labels[i]);
 		if (i == selected)
