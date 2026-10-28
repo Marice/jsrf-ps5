@@ -51,6 +51,7 @@ them, up and down to choose a row, left and right to change it, and X on START G
 | --- | --- |
 | SCALE | The render resolution, 1x to 6x the Xbox's 640x480 (6x fills a 4K screen) |
 | WIDESCREEN | A wider 16:9 view, not a stretch |
+| SMAA | Smooths jagged edges over the finished picture (off by default) |
 | CAMERA | RIGHT STICK turns the camera around the skater; ORIGINAL keeps the game's own camera |
 | DEBUG MODE | Test modes on the touchpad, for development |
 

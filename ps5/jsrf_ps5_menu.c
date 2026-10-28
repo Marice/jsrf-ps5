@@ -144,9 +144,9 @@ static double now_s(void)
 
 static const int kOutputs[] = {1080, 1440, 2160};
 #if defined(JSRF_PS5_RADV)
-enum { ROW_OUTPUT = -1, ROW_SCALE, ROW_WIDE, ROW_CAMERA, ROW_DEBUG, ROW_START, ROWS };
+enum { ROW_OUTPUT = -1, ROW_SCALE, ROW_WIDE, ROW_SMAA, ROW_CAMERA, ROW_DEBUG, ROW_START, ROWS };
 #else
-enum { ROW_OUTPUT, ROW_SCALE, ROW_WIDE, ROW_START, ROWS, ROW_CAMERA = -2, ROW_DEBUG = -3 };
+enum { ROW_OUTPUT, ROW_SCALE, ROW_WIDE, ROW_START, ROWS, ROW_CAMERA = -2, ROW_DEBUG = -3, ROW_SMAA = -4 };
 #endif
 
 /* The most the scale row offers: 6x in the Vulkan build (3840x2880, in widescreen 3840x2160, the 4K screen pixel
@@ -160,6 +160,8 @@ enum { ROW_OUTPUT, ROW_SCALE, ROW_WIDE, ROW_START, ROWS, ROW_CAMERA = -2, ROW_DE
 static int g_output = 2160, g_scale = 4, g_wide = 1, g_camera = 1;
 /* DEBUG MODE: the test modes on the touchpad (jsrf_ps5_vk.c) and their start values; off for playing. */
 int jsrf_ps5_debug;
+/* SMAA over the finished frame (the backend's target_smaa, D71): upstream's key smaa=, off unless chosen. */
+int jsrf_ps5_smaa;
 
 /* Before the status screen opens: the display in the kept mode, so the menu is already shown in it. */
 void jsrf_ps5_menu_prepare(const char *settings)
@@ -184,6 +186,7 @@ void jsrf_ps5_menu_prepare(const char *settings)
 	/* upstream's key for the camera on the right stick (0.5.8, recomp_manual.c), on unless turned off */
 	g_camera = cfg_get(settings, "rstick_camera", 1) != 0;
 	jsrf_ps5_debug = cfg_get(settings, "debug_mode", 0) != 0;
+	jsrf_ps5_smaa = cfg_get(settings, "smaa", 0) != 0;
 	jsrf_ps5_display_mode(g_output);
 	fprintf(stderr, "jsrf: menu: kept choices: output %dp, scale %d, widescreen %s, right-stick camera %s\n",
 	        g_output, g_scale, g_wide ? "on" : "off", g_camera ? "on" : "off");
@@ -193,7 +196,7 @@ void jsrf_ps5_menu_prepare(const char *settings)
 void jsrf_ps5_menu(const char *settings)
 {
 #if defined(JSRF_PS5_RADV)
-	static const char *const labels[ROWS] = {"SCALE", "WIDESCREEN", "CAMERA", "DEBUG MODE", "START GAME"};
+	static const char *const labels[ROWS] = {"SCALE", "WIDESCREEN", "SMAA", "CAMERA", "DEBUG MODE", "START GAME"};
 #else
 	static const char *const labels[ROWS] = {"RESOLUTION", "SCALE", "WIDESCREEN", "START GAME"};
 #endif
@@ -253,6 +256,8 @@ void jsrf_ps5_menu(const char *settings)
 				g_scale = (g_scale - 1 + SCALE_MAX + step) % SCALE_MAX + 1;
 			} else if (step && selected == ROW_WIDE) {
 				g_wide = !g_wide;
+			} else if (step && selected == ROW_SMAA) {
+				jsrf_ps5_smaa = !jsrf_ps5_smaa;
 			} else if (step && selected == ROW_CAMERA) {
 				g_camera = !g_camera;
 			} else if (step && selected == ROW_DEBUG) {
@@ -269,6 +274,7 @@ void jsrf_ps5_menu(const char *settings)
 		values[ROW_SCALE] = scale;
 		values[ROW_WIDE] = g_wide ? "ON" : "OFF";
 #if defined(JSRF_PS5_RADV)
+		values[ROW_SMAA] = jsrf_ps5_smaa ? "ON" : "OFF";
 		values[ROW_CAMERA] = g_camera ? "RIGHT STICK" : "ORIGINAL";
 		values[ROW_DEBUG] = jsrf_ps5_debug ? "ON" : "OFF";
 #endif
@@ -277,11 +283,12 @@ void jsrf_ps5_menu(const char *settings)
 		                     footer);
 		usleep(8000);
 	}
-	static const char *const keys[] = {"ps5_output", "scale", "widescreen", "rstick_camera", "debug_mode"};
-	const int kept[] = {g_output, g_scale, g_wide, g_camera, jsrf_ps5_debug};
-	cfg_put(settings, keys, kept, 5);
-	fprintf(stderr, "jsrf: menu: starting with output %dp, scale %d, widescreen %s, right-stick camera %s, debug %s\n",
-	        g_output, g_scale, g_wide ? "on" : "off", g_camera ? "on" : "off", jsrf_ps5_debug ? "on" : "off");
+	static const char *const keys[] = {"ps5_output", "scale", "widescreen", "rstick_camera", "debug_mode", "smaa"};
+	const int kept[] = {g_output, g_scale, g_wide, g_camera, jsrf_ps5_debug, jsrf_ps5_smaa};
+	cfg_put(settings, keys, kept, 6);
+	fprintf(stderr, "jsrf: menu: starting with output %dp, scale %d, widescreen %s, SMAA %s, right-stick camera %s, "
+	        "debug %s\n", g_output, g_scale, g_wide ? "on" : "off", jsrf_ps5_smaa ? "on" : "off",
+	        g_camera ? "on" : "off", jsrf_ps5_debug ? "on" : "off");
 #if defined(JSRF_PS5_RADV)
 	snprintf(scale, sizeof scale, "%d", g_scale);
 	setenv("RECOMP_GL_SCALE", scale, 1);

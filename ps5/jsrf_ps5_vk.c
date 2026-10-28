@@ -194,10 +194,11 @@ int mkstemp(char *template)
 	return -1;
 }
 
-/* Anti-aliasing as the window would have it: off (the Vulkan device has neither SMAA nor MSAA yet). */
+/* Anti-aliasing as the window would have it: SMAA as the start menu has it (decision log D71); no MSAA. */
+extern int jsrf_ps5_smaa; /* jsrf_ps5_menu.c */
 int nv_window_pref_smaa(void)
 {
-	return 0;
+	return jsrf_ps5_smaa;
 }
 
 int nv_window_pref_msaa(void)

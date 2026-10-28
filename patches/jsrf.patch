@@ -1876,10 +1876,10 @@ index 39c1ce9..fc56a8c 100644
              g_is_gl = 0;
 diff --git a/src/nv2a_vk/nv2a_vk.c b/src/nv2a_vk/nv2a_vk.c
 new file mode 100644
-index 0000000..9fbc2c7
+index 0000000..54b9580
 --- /dev/null
 +++ b/src/nv2a_vk/nv2a_vk.c
-@@ -0,0 +1,3803 @@
+@@ -0,0 +1,4099 @@
 +/*
 + * The NV2A renderer's device on Vulkan (nv2a_backend.h): the third backend,
 + * beside OpenGL (nv2a_gl/nv2a_gfx_gl.c) and Metal (nv2a_metal/nv2a_metal.m).
@@ -1928,6 +1928,7 @@ index 0000000..9fbc2c7
 +#include <glslang/Public/resource_limits_c.h>
 +
 +#include "nv2a_backend.h"
++#include "nv2a_smaa.h"
 +#if !defined(NV2A_VK_HOST)
 +#include "nv2a_shader_cache.h"
 +#endif
@@ -1965,7 +1966,7 @@ index 0000000..9fbc2c7
 +	X(UpdateDescriptorSets) X(CreateSemaphore) X(CreateSwapchainKHR) X(GetSwapchainImagesKHR)                   \
 +	X(AcquireNextImageKHR) X(QueuePresentKHR) X(CmdPipelineBarrier2) X(CmdBeginRendering) X(CmdEndRendering)   \
 +	X(CmdSetViewport) X(CmdSetScissor) X(CmdBindPipeline) X(CmdBindDescriptorSets) X(CmdBindVertexBuffers)     \
-+	X(CmdBindIndexBuffer) X(CmdDraw) X(CmdDrawIndexed) X(CmdClearAttachments) X(CmdClearColorImage)             \
++	X(CmdBindIndexBuffer) X(CmdDraw) X(CmdPushConstants) X(CmdDrawIndexed) X(CmdClearAttachments) X(CmdClearColorImage)             \
 +	X(CmdClearDepthStencilImage) X(CmdCopyBufferToImage) X(CmdCopyImageToBuffer) X(CmdCopyImage)               \
 +	X(CmdBlitImage) X(CmdSetCullMode) X(CmdSetFrontFace) X(CmdSetPrimitiveTopology) X(CmdSetDepthTestEnable)  \
 +	X(CmdSetDepthWriteEnable) X(CmdSetDepthCompareOp) X(CmdSetStencilTestEnable) X(CmdSetStencilOp)           \
@@ -2090,6 +2091,7 @@ index 0000000..9fbc2c7
 +static uint32_t g_family;
 +static VkPhysicalDeviceMemoryProperties g_memprops;
 +static VkPhysicalDeviceLimits g_limits;
++static int g_aniso_ok;                 /* samplerAnisotropy enabled on the device */
 +static VkSwapchainKHR g_swap;
 +static VkImage g_swap_img[8];
 +static VkSemaphore g_rendered[8];
@@ -2128,6 +2130,7 @@ index 0000000..9fbc2c7
 +	int valid;
 +	VkPipeline pipe;
 +	int cull, wind, topo, dt, dw, df, st, bias;
++	float bias_units, bias_slope;
 +	uint32_t sfunc, sops, rmask, wmask, ref;
 +	VkRect2D sc;
 +} E;
@@ -2358,7 +2361,7 @@ index 0000000..9fbc2c7
 +	static struct { uint32_t key; VkSampler smp; } cache[256];
 +	static int n;
 +	uint32_t key = (uint32_t)s->min_linear | s->mag_linear << 1 | (uint32_t)s->mip << 2 | (uint32_t)s->wrap_s << 4 |
-+	               (uint32_t)s->wrap_t << 6 | (uint32_t)(s->aniso ? 1 : 0) << 8;
++	               (uint32_t)s->wrap_t << 6 | (uint32_t)(s->aniso & 31) << 8;
 +	for (int i = 0; i < n; i++)
 +		if (cache[i].key == key)
 +			return cache[i].smp;
@@ -2375,6 +2378,12 @@ index 0000000..9fbc2c7
 +		.maxLod = s->mip ? VK_LOD_CLAMP_NONE : 0.0f,
 +		.borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK,
 +	};
++	/* The front half's anisotropy (tex_aniso: 16x unless RECOMP_GL_ANISO says otherwise, or what the title asked),
++	   for linear minification only, up to the device's limit (jsrf-ps5 decision log D71). */
++	if (g_aniso_ok && s->aniso > 1 && s->min_linear) {
++		si.anisotropyEnable = VK_TRUE;
++		si.maxAnisotropy = s->aniso < g_limits.maxSamplerAnisotropy ? (float)s->aniso : g_limits.maxSamplerAnisotropy;
++	}
 +	VkSampler smp = VK_NULL_HANDLE;
 +	vkCreateSampler(g_dev, &si, NULL, &smp);
 +	if (n < 256)
@@ -4307,9 +4316,52 @@ index 0000000..9fbc2c7
 +/* Draws that sample a unit and get black in its place (V3): the handle given is gone, or none was given. */
 +static uint64_t n_tex_gone, n_tex_none;
 +
-+static VkDescriptorSet descriptor_set(void)
++/* A set from this frame's pools with the ring's uniform blocks and the four textures `tex` (handles, none 0). */
++static VkDescriptorSet set_new(const uint32_t tex[4])
 +{
 +	Frame *f = &g_fr[g_slot];
++	VkDescriptorSet set = VK_NULL_HANDLE;
++	for (;;) {
++		if (f->pool_at == f->npools) {
++			if (f->npools == 16)
++				return VK_NULL_HANDLE;
++			VkDescriptorPoolSize sizes[2] = {{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 2 * 4096},
++			                                 {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4 * 4096}};
++			VkDescriptorPoolCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
++			                                 .maxSets = 4096, .poolSizeCount = 2, .pPoolSizes = sizes};
++			if (vkCreateDescriptorPool(g_dev, &pi, NULL, &f->pools[f->npools]) != VK_SUCCESS)
++				return VK_NULL_HANDLE;
++			f->npools++;
++		}
++		VkDescriptorSetAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
++		                                  .descriptorPool = f->pools[f->pool_at], .descriptorSetCount = 1,
++		                                  .pSetLayouts = &g_set_layout};
++		if (vkAllocateDescriptorSets(g_dev, &ai, &set) == VK_SUCCESS)
++			break;
++		f->pool_at++;
++	}
++	VkDescriptorBufferInfo bufs[2] = {{f->ring, 0, UBO_RANGE}, {f->ring, 0, UBO_RANGE}};
++	VkDescriptorImageInfo imgs[4];
++	for (int u = 0; u < 4; u++) {
++		VkTex *t = &g_tex[tex[u] - 1];
++		imgs[u] = (VkDescriptorImageInfo){t->sampler, t->view,
++		                                  t->is_target ? VK_IMAGE_LAYOUT_GENERAL
++		                                               : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
++	}
++	VkWriteDescriptorSet w[3] = {
++		{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = 0, .descriptorCount = 1,
++		 .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, .pBufferInfo = &bufs[0]},
++		{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = 1, .descriptorCount = 1,
++		 .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, .pBufferInfo = &bufs[1]},
++		{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = 2, .descriptorCount = 4,
++		 .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = imgs},
++	};
++	vkUpdateDescriptorSets(g_dev, 3, w, 0, NULL);
++	return set;
++}
++
++static VkDescriptorSet descriptor_set(void)
++{
 +	uint32_t tex[4];
 +	const uint32_t sampled = prog_ok(g_cur_prog) ? g_prog[g_cur_prog - 1].samplers : 0;
 +	/* RESOLVE: a target about to be sampled, moved out of GENERAL and back, so RADV resolves what a fast clear or
@@ -4349,43 +4401,9 @@ index 0000000..9fbc2c7
 +	}
 +	if (g_set && g_set_stamp == g_stamp && !memcmp(tex, g_set_tex, sizeof tex))
 +		return g_set;
-+	VkDescriptorSet set = VK_NULL_HANDLE;
-+	for (;;) {
-+		if (f->pool_at == f->npools) {
-+			if (f->npools == 16)
-+				return VK_NULL_HANDLE;
-+			VkDescriptorPoolSize sizes[2] = {{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 2 * 4096},
-+			                                 {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4 * 4096}};
-+			VkDescriptorPoolCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-+			                                 .maxSets = 4096, .poolSizeCount = 2, .pPoolSizes = sizes};
-+			if (vkCreateDescriptorPool(g_dev, &pi, NULL, &f->pools[f->npools]) != VK_SUCCESS)
-+				return VK_NULL_HANDLE;
-+			f->npools++;
-+		}
-+		VkDescriptorSetAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-+		                                  .descriptorPool = f->pools[f->pool_at], .descriptorSetCount = 1,
-+		                                  .pSetLayouts = &g_set_layout};
-+		if (vkAllocateDescriptorSets(g_dev, &ai, &set) == VK_SUCCESS)
-+			break;
-+		f->pool_at++;
-+	}
-+	VkDescriptorBufferInfo bufs[2] = {{f->ring, 0, UBO_RANGE}, {f->ring, 0, UBO_RANGE}};
-+	VkDescriptorImageInfo imgs[4];
-+	for (int u = 0; u < 4; u++) {
-+		VkTex *t = &g_tex[tex[u] - 1];
-+		imgs[u] = (VkDescriptorImageInfo){t->sampler, t->view,
-+		                                  t->is_target ? VK_IMAGE_LAYOUT_GENERAL
-+		                                               : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-+	}
-+	VkWriteDescriptorSet w[3] = {
-+		{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = 0, .descriptorCount = 1,
-+		 .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, .pBufferInfo = &bufs[0]},
-+		{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = 1, .descriptorCount = 1,
-+		 .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, .pBufferInfo = &bufs[1]},
-+		{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = 2, .descriptorCount = 4,
-+		 .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = imgs},
-+	};
-+	vkUpdateDescriptorSets(g_dev, 3, w, 0, NULL);
++	VkDescriptorSet set = set_new(tex);
++	if (!set)
++		return VK_NULL_HANDLE;
 +	g_set = set;
 +	g_set_stamp = g_stamp;
 +	memcpy(g_set_tex, tex, sizeof tex);
@@ -4493,13 +4511,24 @@ index 0000000..9fbc2c7
 +	 * drawn with no depth test at all. Toward the camera is a larger depth with reversed depth, a smaller one
 +	 * without. */
 +	int bias = dt && g_rs.blend_enable && (jsrf_vk_modes & JSRF_VK_DECALBIAS);
++	float units = g_zrev ? 16.0f : -16.0f, slope = g_zrev ? 1.0f : -1.0f;
++	if (!bias && dt && g_rs.poly_offset) {
++		/* The title's polygon offset (0.5.9's front half: glPolygonOffset's factor and units, the factor already
++		 * times the scale and both turned round for reversed depth), as Vulkan's depth bias: units are the
++		 * constant, the factor the slope (jsrf-ps5 decision log D71). */
++		bias = 1;
++		units = g_rs.poly_offset_units;
++		slope = g_rs.poly_offset_factor;
++	}
 +	if (dt && g_rs.blend_enable && (jsrf_vk_modes & JSRF_VK_BLENDNOZ))
 +		dt = dw = 0;
-+	if (!E.valid || E.bias != bias) {
++	if (!E.valid || E.bias != bias || (bias && (E.bias_units != units || E.bias_slope != slope))) {
 +		vkCmdSetDepthBiasEnable(c, (VkBool32)bias);
 +		if (bias)
-+			vkCmdSetDepthBias(c, g_zrev ? 16.0f : -16.0f, 0.0f, g_zrev ? 1.0f : -1.0f);
++			vkCmdSetDepthBias(c, units, 0.0f, slope);
 +		E.bias = bias;
++		E.bias_units = units;
++		E.bias_slope = slope;
 +	}
 +	if (!E.valid || E.dt != dt) { vkCmdSetDepthTestEnable(c, (VkBool32)dt); E.dt = dt; }
 +	if (!E.valid || E.dw != dw) { vkCmdSetDepthWriteEnable(c, (VkBool32)dw); E.dw = dw; }
@@ -4784,6 +4813,252 @@ index 0000000..9fbc2c7
 +	g_ovl_h = h;
 +}
 +
++/* ---- SMAA (nv2a_smaa.h): target_smaa (jsrf-ps5 decision log D71) -----------------------------------------------
++ *
++ * Upstream's GLSL for OpenGL, made Vulkan GLSL: version 450, the target's metrics a push constant, each sampler and
++ * varying given its binding or location by name, gl_VertexIndex. The passes draw with an upright viewport (clip
++ * y = -1 at the top row), not the turned-over one of the title's draws: the triangle's texture coordinate 0 then
++ * meets the images' row 0 on both sides, and SMAA addresses its look-up textures by coordinate only. Edges and
++ * weights are colour images of the target's size; the result is a target of its own, which is what is shown. */
++static struct {
++	int bad;
++	VkPipelineLayout layout;
++	VkPipeline pipe[3];
++	uint32_t area, search, edges, weights; /* textures */
++	uint32_t out;                          /* the target shown */
++	uint32_t w, h;
++} g_sm;
++
++static int smaa_slot(const char *name)
++{
++	static const char *const names[] = {"smaaUv",   "smaaPix",  "smaaO0",   "smaaO1",  "smaaO2",   "smaaOut",
++	                                    "colorTex", "edgesTex", "blendTex", "areaTex", "searchTex"};
++	static const int slot[] = {0, 1, 2, 3, 4, 0, 0, 0, 1, 1, 2};
++	for (size_t i = 0; i < sizeof names / sizeof names[0]; i++)
++		if (!strcmp(name, names[i]))
++			return slot[i];
++	return -1;
++}
++
++static char *smaa_source(int pass, int frag)
++{
++	char *src = nv2a_smaa_glsl_source(pass, frag);
++	if (!src)
++		return NULL;
++	Str out = {0};
++	const char *line = src;
++	int first = 1;
++	while (*line) {
++		const char *eol = strchr(line, '\n');
++		if (!eol)
++			eol = line + strlen(line);
++		size_t n = (size_t)(eol - line);
++		char buf[256], ty[32], name[64];
++		if (n < sizeof buf) {
++			memcpy(buf, line, n);
++			buf[n] = 0;
++		} else {
++			buf[0] = 0;
++		}
++		if (first) {
++			str_add(&out, "#version 450\n", 13);
++			first = 0;
++		} else if (!strcmp(buf, "uniform vec4 smaaRt;")) {
++			str_fmt(&out, "layout(push_constant) uniform SmaaRt { vec4 smaaRt; };\n");
++		} else if (sscanf(buf, "uniform sampler2D %63[A-Za-z0-9_];", name) == 1 && smaa_slot(name) >= 0) {
++			str_fmt(&out, "layout(set = 0, binding = %d) %s\n", 2 + smaa_slot(name), buf);
++		} else if ((sscanf(buf, "in %31s %63[A-Za-z0-9_];", ty, name) == 2 ||
++		            sscanf(buf, "out %31s %63[A-Za-z0-9_];", ty, name) == 2) &&
++		           smaa_slot(name) >= 0) {
++			str_fmt(&out, "layout(location = %d) %s\n", smaa_slot(name), buf);
++		} else {
++			for (const char *p = line; p < eol;) {
++				const char *id = strstr(p, "gl_VertexID");
++				if (!id || id >= eol) {
++					str_add(&out, p, (size_t)(eol - p));
++					break;
++				}
++				str_add(&out, p, (size_t)(id - p));
++				str_add(&out, "gl_VertexIndex", 14);
++				p = id + 11;
++			}
++			str_add(&out, "\n", 1);
++		}
++		line = *eol ? eol + 1 : eol;
++	}
++	free(src);
++	return out.p;
++}
++
++static VkPipeline smaa_pipeline(int pass)
++{
++	VkShaderModule m[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
++	VkPipeline pipe = VK_NULL_HANDLE;
++	for (int fr = 0; fr < 2; fr++) {
++		char *src = smaa_source(pass, fr);
++		size_t words = 0;
++		uint32_t *code = src ? compile_spirv(src, fr ? GLSLANG_STAGE_FRAGMENT : GLSLANG_STAGE_VERTEX, "SMAA", &words)
++		                     : NULL;
++		free(src);
++		m[fr] = code ? make_module(code, words, "SMAA") : VK_NULL_HANDLE;
++		free(code);
++		if (!m[fr])
++			goto done;
++	}
++	{
++		VkPipelineShaderStageCreateInfo st[2] = {
++			{.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT,
++			 .module = m[0], .pName = "main"},
++			{.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
++			 .module = m[1], .pName = "main"}};
++		VkPipelineVertexInputStateCreateInfo vi = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
++		VkPipelineInputAssemblyStateCreateInfo ia = {.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
++		                                             .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST};
++		VkPipelineViewportStateCreateInfo vp = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
++		                                        .viewportCount = 1, .scissorCount = 1};
++		VkPipelineRasterizationStateCreateInfo rs = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
++		                                             .polygonMode = VK_POLYGON_MODE_FILL, .cullMode = VK_CULL_MODE_NONE,
++		                                             .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE, .lineWidth = 1.0f};
++		VkPipelineMultisampleStateCreateInfo ms = {.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
++		                                           .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT};
++		VkPipelineColorBlendAttachmentState ba = {.colorWriteMask = 0xF};
++		VkPipelineColorBlendStateCreateInfo cb = {.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
++		                                          .attachmentCount = 1, .pAttachments = &ba};
++		const VkDynamicState dyn[2] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
++		VkPipelineDynamicStateCreateInfo dy = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
++		                                       .dynamicStateCount = 2, .pDynamicStates = dyn};
++		VkPipelineRenderingCreateInfo ri = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
++		                                    .colorAttachmentCount = 1, .pColorAttachmentFormats = &COLOR_FMT};
++		VkGraphicsPipelineCreateInfo gi = {.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &ri,
++		                                   .stageCount = 2, .pStages = st, .pVertexInputState = &vi,
++		                                   .pInputAssemblyState = &ia, .pViewportState = &vp,
++		                                   .pRasterizationState = &rs, .pMultisampleState = &ms,
++		                                   .pColorBlendState = &cb, .pDynamicState = &dy, .layout = g_sm.layout};
++		if (vkCreateGraphicsPipelines(g_dev, g_pipe_cache, 1, &gi, NULL, &pipe) != VK_SUCCESS)
++			pipe = VK_NULL_HANDLE;
++	}
++done:
++	for (int fr = 0; fr < 2; fr++)
++		if (m[fr])
++			vkDestroyShaderModule(g_dev, m[fr], NULL);
++	return pipe;
++}
++
++/* The pipelines and the look-up textures, once; 0 when they would not build. */
++static int smaa_build(void)
++{
++	VkPushConstantRange pc = {VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16};
++	VkPipelineLayoutCreateInfo pl = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1,
++	                                 .pSetLayouts = &g_set_layout, .pushConstantRangeCount = 1,
++	                                 .pPushConstantRanges = &pc};
++	if (vkCreatePipelineLayout(g_dev, &pl, NULL, &g_sm.layout) != VK_SUCCESS)
++		return 0;
++	double t0 = now_ms();
++	for (int p = 0; p < 3; p++)
++		if (!(g_sm.pipe[p] = smaa_pipeline(p)))
++			return 0;
++	/* RG8 and R8 as they come, widened to the RGBA8 every texture here is */
++	uint8_t *rgba = malloc((size_t)NV2A_SMAA_AREA_W * NV2A_SMAA_AREA_H * 4);
++	if (!rgba)
++		return 0;
++	const unsigned char *a = nv2a_smaa_area(), *se = nv2a_smaa_search();
++	for (uint32_t i = 0; i < NV2A_SMAA_AREA_W * NV2A_SMAA_AREA_H; i++) {
++		rgba[i * 4 + 0] = a[i * 2];
++		rgba[i * 4 + 1] = a[i * 2 + 1];
++		rgba[i * 4 + 2] = rgba[i * 4 + 3] = 0;
++	}
++	Nv2aSampler lin = {.min_linear = 1, .mag_linear = 1}, point = {0};
++	g_sm.area = vk_tex_new(NV2A_SMAA_AREA_W, NV2A_SMAA_AREA_H, rgba, &lin);
++	for (uint32_t i = 0; i < NV2A_SMAA_SEARCH_W * NV2A_SMAA_SEARCH_H; i++) {
++		rgba[i * 4 + 0] = se[i];
++		rgba[i * 4 + 1] = rgba[i * 4 + 2] = rgba[i * 4 + 3] = 0;
++	}
++	g_sm.search = vk_tex_new(NV2A_SMAA_SEARCH_W, NV2A_SMAA_SEARCH_H, rgba, &point);
++	free(rgba);
++	LOG("SMAA: built in %.0f ms\n", now_ms() - t0);
++	return g_sm.area && g_sm.search;
++}
++
++/* The edges' and weights' images and the result's target at pw x ph. */
++static int smaa_size(uint32_t pw, uint32_t ph)
++{
++	if (g_sm.edges)
++		tex_destroy(g_sm.edges);
++	if (g_sm.weights)
++		tex_destroy(g_sm.weights);
++	if (g_sm.out)
++		vk_target_free(g_sm.out);
++	g_sm.edges = color_image(pw, ph);
++	g_sm.weights = color_image(pw, ph);
++	g_sm.out = vk_target_new(pw, ph);
++	if (!g_sm.edges || !g_sm.weights || !g_sm.out)
++		return 0;
++	pass_end();
++	VkCommandBuffer c = cmd();
++	image_layout(c, g_tex[g_sm.edges - 1].image, VK_IMAGE_ASPECT_COLOR_BIT, 1, VK_IMAGE_LAYOUT_UNDEFINED,
++	             VK_IMAGE_LAYOUT_GENERAL);
++	image_layout(c, g_tex[g_sm.weights - 1].image, VK_IMAGE_ASPECT_COLOR_BIT, 1, VK_IMAGE_LAYOUT_UNDEFINED,
++	             VK_IMAGE_LAYOUT_GENERAL);
++	g_sm.w = pw;
++	g_sm.h = ph;
++	return 1;
++}
++
++static void smaa_pass(VkCommandBuffer c, int pass, uint32_t dst, int clear, uint32_t t0, uint32_t t1, uint32_t t2,
++                      const float rt[4])
++{
++	VkRenderingAttachmentInfo ca = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
++	                                .imageView = g_tex[dst - 1].view, .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
++	                                .loadOp = clear ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_DONT_CARE,
++	                                .storeOp = VK_ATTACHMENT_STORE_OP_STORE};
++	VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, {g_sm.w, g_sm.h}},
++	                      .layerCount = 1, .colorAttachmentCount = 1, .pColorAttachments = &ca};
++	const uint32_t tex[4] = {t0, t1 ? t1 : g_black, t2 ? t2 : g_black, g_black};
++	VkDescriptorSet set = set_new(tex);
++	if (!set)
++		return;
++	vkCmdBeginRendering(c, &ri);
++	vkCmdBindPipeline(c, VK_PIPELINE_BIND_POINT_GRAPHICS, g_sm.pipe[pass]);
++	VkViewport vp = {0, 0, (float)g_sm.w, (float)g_sm.h, 0.0f, 1.0f};
++	VkRect2D sc = {{0, 0}, {g_sm.w, g_sm.h}};
++	vkCmdSetViewport(c, 0, 1, &vp);
++	vkCmdSetScissor(c, 0, 1, &sc);
++	const uint32_t dyn[2] = {0, 0};
++	vkCmdBindDescriptorSets(c, VK_PIPELINE_BIND_POINT_GRAPHICS, g_sm.layout, 0, 1, &set, 2, dyn);
++	vkCmdPushConstants(c, g_sm.layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16, rt);
++	vkCmdDraw(c, 3, 1, 0, 0);
++	vkCmdEndRendering(c);
++	barrier_all(c);
++}
++
++static uint32_t vk_target_smaa(uint32_t h)
++{
++	if (!rt_ok(h) || g_sm.bad)
++		return h;
++	if (!g_sm.pipe[2] && !smaa_build()) {
++		g_sm.bad = 1;
++		LOG("SMAA: no pipelines; frames are shown without it\n");
++		return h;
++	}
++	const uint32_t pw = g_rt[h - 1].pw, ph = g_rt[h - 1].ph;
++	if ((g_sm.w != pw || g_sm.h != ph || !rt_ok(g_sm.out)) && !smaa_size(pw, ph)) {
++		g_sm.bad = 1;
++		LOG("SMAA: no images at %ux%u; frames are shown without it\n", pw, ph);
++		return h;
++	}
++	pass_end();
++	VkCommandBuffer c = cmd();
++	barrier_all(c);
++	const float rt[4] = {1.0f / (float)pw, 1.0f / (float)ph, (float)pw, (float)ph};
++	const uint32_t color = g_rt[h - 1].color;
++	smaa_pass(c, 0, g_sm.edges, 1, color, 0, 0, rt);                          /* edges, from the frame */
++	smaa_pass(c, 1, g_sm.weights, 1, g_sm.edges, g_sm.area, g_sm.search, rt); /* weights */
++	smaa_pass(c, 2, g_rt[g_sm.out - 1].color, 0, color, g_sm.weights, 0, rt); /* the frame, blended */
++	g_rt[g_sm.out - 1].dirty = 1;
++	E.valid = 0;
++	return g_sm.out;
++}
++
 +static void vk_present(uint32_t h, uint32_t pw, uint32_t ph)
 +{
 +	if (jsrf_ps5_frame_hook)
@@ -4956,6 +5231,7 @@ index 0000000..9fbc2c7
 +	VkPhysicalDeviceFeatures have;
 +	vkGetPhysicalDeviceFeatures(g_phys, &have);
 +	VkPhysicalDeviceFeatures want = {.depthClamp = have.depthClamp, .samplerAnisotropy = have.samplerAnisotropy};
++	g_aniso_ok = have.samplerAnisotropy;
 +	const float prio = 1.0f;
 +	VkDeviceQueueCreateInfo qi = {.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = g_family,
 +	                              .queueCount = 1, .pQueuePriorities = &prio};
@@ -4977,8 +5253,9 @@ index 0000000..9fbc2c7
 +#define LOAD_D(name) vk##name = (PFN_vk##name)vkGetDeviceProcAddr(g_dev, "vk" #name);
 +	DEVICE_COMMANDS(LOAD_D)
 +	vkGetDeviceQueue(g_dev, g_family, 0, &g_queue);
-+	LOG("depth %s, depth clamp %s\n", g_depth_fmt == VK_FORMAT_D32_SFLOAT_S8_UINT ? "D32S8" : "D24S8",
-+	    have.depthClamp ? "yes" : "no");
++	LOG("depth %s, depth clamp %s, anisotropy %s (up to %.0fx)\n",
++	    g_depth_fmt == VK_FORMAT_D32_SFLOAT_S8_UINT ? "D32S8" : "D24S8", have.depthClamp ? "yes" : "no",
++	    have.samplerAnisotropy ? "yes" : "no", (double)g_limits.maxSamplerAnisotropy);
 +	return 1;
 +}
 +
@@ -5493,12 +5770,30 @@ index 0000000..9fbc2c7
 +				;
 +			/* every target as it stands: this title draws a frame into one and copies it to the shown one at the
 +			 * start of the next, so the presented target still holds the frame before */
-+			(void)i;
 +			for (uint32_t k = 0; k < nrt; k++)
 +				if (rt_to[k]) {
 +					snprintf(name, sizeof name, CAP_DIR "/rf%d_%s_rt%u.bmp", n, mode, rt_from[k]);
 +					replay_bmp(name, rt_to[k], 0);
 +				}
++			/* JSRF_RF_SMAA=<target>: that target through SMAA too (D71); the presented one still holds the frame
++			 * before, so the one drawn into is the one to give */
++			const char *smaa_rt = getenv("JSRF_RF_SMAA");
++			for (i = 0; smaa_rt && i < nrt && rt_from[i] != (uint32_t)atoi(smaa_rt); i++)
++				;
++			if (smaa_rt && i < nrt && rt_to[i]) {
++				uint32_t sm = vk_target_smaa(rt_to[i]);
++				snprintf(name, sizeof name, CAP_DIR "/rf%d_%s_rt%u_smaa.bmp", n, mode, rt_from[i]);
++				replay_bmp(name, sm, 0);
++				for (int k = 0; k < 2; k++) {
++					uint32_t t = k ? g_sm.weights : g_sm.edges, lit = 0;
++					uint8_t *p = t ? read_region(g_tex[t - 1].image, VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, g_sm.w, g_sm.h, 4)
++					               : NULL;
++					for (uint32_t q = 0; p && q < g_sm.w * g_sm.h; q++)
++						lit += (p[q * 4] | p[q * 4 + 1] | p[q * 4 + 2] | p[q * 4 + 3]) != 0;
++					LOG("SMAA %s: %u of %u pixels set\n", k ? "weights" : "edges", lit, g_sm.w * g_sm.h);
++					(void)0; /* read_region keeps its buffer */
++				}
++			}
 +		}
 +	}
 +	if (stopped || only >= 0) {
@@ -5670,6 +5965,7 @@ index 0000000..9fbc2c7
 +	.report = vk_report,
 +	.uniform_f_part = vk_uniform_f_part,
 +	.pipeline_ms = vk_pipeline_ms,
++	.target_smaa = vk_target_smaa,
 +#if !defined(NV2A_VK_HOST)
 +	.cache_open = vk_cache_open,
 +	.cache_idle = vk_cache_idle,
